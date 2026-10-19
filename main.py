@@ -1,6 +1,7 @@
 #Imports TBD
 import sys, os
-#TODO import scanner file
+from ClamScanner import ClamScanner
+#TODO import scanner file(s)
 
 print(r"""
     ____             __             ______           _____                                 
@@ -20,15 +21,21 @@ help_menu = {
              "q" : "An alias for \"exit\""
             }
 
+toolMap = {
+            1 : "ClamAV",
+            2 : "Trivy",
+            3 : "Aqua Security"
+          }
+
 global_cmd = None
 def user_input(isInt = False):
     #Collect a string/int input from the user and display the current active command
     out = None
 
     if global_cmd == None:
-        out = input("DockerEnvScanner> ")
+        out = input("\nDockerEnvScanner> ")
     else:
-        out = input("DockerEnvScanner/{}> ".format(global_cmd))
+        out = input("\nDockerEnvScanner/{}> ".format(global_cmd))
 
     #Ensure int inputs are valid
     if isInt:
@@ -41,9 +48,9 @@ def user_input(isInt = False):
                 print("Input must be an integer.")
 
                 if global_cmd == None:
-                    out = input("DockerEnvScanner> ")
+                    out = input("\nDockerEnvScanner> ")
                 else:
-                    out = input("DockerEnvScanner/{}> ".format(global_cmd))
+                    out = input("\nDockerEnvScanner/{}> ".format(global_cmd))
 
     return out.lower() if not isInt else out
 
@@ -72,7 +79,7 @@ while True:
                 print("No files found in /containers. For container analysis, please place one or more files in that directory and run singlescan again.")
                 continue
 
-            print("Which file would you like to scan? Enter its list number (e.g. 3).")
+            print("Which file/directory would you like to scan? Enter its list number (e.g. 3).")
 
             #Print contents of /containers
             num = 1
@@ -82,15 +89,39 @@ while True:
 
             scanChoice = user_input(True)
 
-            print("Which tool would you like to use to analyze {}?".format(containers[scanChoice - 1]))
+            if scanChoice < 1 or scanChoice > len(containers):
+                print("File/directory out of range. Exiting singlescan...")
+                continue
 
-            #TODO replace with true tool options
-            print("1. Cool Tool\n2. Other Tool")
+            print("Which tool would you like to use to analyze {}?".format(containers[scanChoice - 1]))
+            print("1. ClamAV\n2. Trivy\n3. Aqua Security")
 
             toolChoice = user_input(True)
 
             #TODO call scanner with chosen tool
-            print("TODO: calling tool on file...")
+            print("Calling tool {} on file/directory {}...".format(toolMap[toolChoice], containers[scanChoice - 1]))
+
+            match toolChoice:
+                case 1:
+                    #Call ClamAV scanner
+                    scanner = ClamScanner(containers[scanChoice - 1])
+                    scanner.scan()
+                    continue
+
+                case 2:
+                    #TODO: Call Trivy scanner
+                    print("Trivy scanning not yet implemented.")
+                    continue
+
+                case 3:
+                    #TODO: Call Aqua Security scanner
+                    print("Aqua Security scanning not yet implemented.")
+                    continue
+
+                case _:
+                    #Default case
+                    print("Tool selection out of range. Exiting singlescan...")
+                    continue
 
             continue
 
