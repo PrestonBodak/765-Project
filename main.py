@@ -85,6 +85,10 @@ while True:
 
             toolChoice = user_input(True)
 
+            if toolChoice < 1 or toolChoice > 3:
+                print("Tool selection out of range. Exiting singlescan...")
+                continue
+
             #Do not prompt for a file to scan when using Tracee, which just scans the environment
             if toolChoice != 3:
                 print("Which file/directory would you like to scan? Enter its list number (e.g. 3).")
