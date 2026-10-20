@@ -1,6 +1,7 @@
 #Imports TBD
 import sys, os
 from ClamScanner import ClamScanner
+from TraceeScanner import TraceeScanner
 #TODO import scanner file(s)
 
 print(r"""
@@ -24,7 +25,7 @@ help_menu = {
 toolMap = {
             1 : "ClamAV",
             2 : "Trivy",
-            3 : "Aqua Security"
+            3 : "Tracee"
           }
 
 global_cmd = None
@@ -79,27 +80,32 @@ while True:
                 print("No files found in /containers. For container analysis, please place one or more files in that directory and run singlescan again.")
                 continue
 
-            print("Which file/directory would you like to scan? Enter its list number (e.g. 3).")
-
-            #Print contents of /containers
-            num = 1
-            for filename in containers:
-                print("{}. {}".format(num, filename))
-                num += 1
-
-            scanChoice = user_input(True)
-
-            if scanChoice < 1 or scanChoice > len(containers):
-                print("File/directory out of range. Exiting singlescan...")
-                continue
-
-            print("Which tool would you like to use to analyze {}?".format(containers[scanChoice - 1]))
-            print("1. ClamAV\n2. Trivy\n3. Aqua Security")
+            print("Which tool would you like to use?")
+            print("1. ClamAV\n2. Trivy\n3. Tracee")
 
             toolChoice = user_input(True)
 
+            #Do not prompt for a file to scan when using Tracee, which just scans the environment
+            if toolChoice != 3:
+                print("Which file/directory would you like to scan? Enter its list number (e.g. 3).")
+                
+                #Print contents of /containers
+                num = 1
+                for filename in containers:
+                    print("{}. {}".format(num, filename))
+                    num += 1
+    
+                scanChoice = user_input(True)
+    
+                if scanChoice < 1 or scanChoice > len(containers):
+                    print("File/directory out of range. Exiting singlescan...")
+                    continue
+            else:
+                scanChoice = None
+
+
             #TODO call scanner with chosen tool
-            print("Calling tool {} on file/directory {}...".format(toolMap[toolChoice], containers[scanChoice - 1]))
+            print("Calling tool {}".format(toolMap[toolChoice]) + (" on file/directory {}".format(containers[scanChoice - 1]) if scanChoice != None else "") + "...")
 
             match toolChoice:
                 case 1:
@@ -114,8 +120,9 @@ while True:
                     continue
 
                 case 3:
-                    #TODO: Call Aqua Security scanner
-                    print("Aqua Security scanning not yet implemented.")
+                    #Call Tracee scanner
+                    scanner = TraceeScanner()
+                    scanner.scan()
                     continue
 
                 case _:

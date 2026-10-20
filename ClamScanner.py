@@ -13,4 +13,4 @@ class ClamScanner:
             count = (count + 1) if count != 3 else 1
             time.sleep(0.5)
 
-        print("\nScan complete! Results can be found in scan_outputs/")
+        print("\nScan complete! Results can be found in scan_outputs/clam_out.txt")
