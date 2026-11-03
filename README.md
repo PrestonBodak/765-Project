@@ -1,4 +1,8 @@
-# Installation prerequisites:
+# WARNING
+
+This tool is intended to be run in an isolated test environment! For effective threat identification, some files may need to be decompressed or run within the `containers` folder. While this tool aims to be as user-friendly as possible, please ensure that it is only used within an isolated virtual machine or otherwise secure operating system before proceeding.
+
+# Installation Prerequisites:
 
 ### ClamAV:
 docs.clamav.net/manual/Installing/Packages.html
