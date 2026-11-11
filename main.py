@@ -128,7 +128,11 @@ while True:
                         case 1:
                             #Scan a file with Trivy
                             scanChoice = file_input()
-                            print(containers[scanChoice - 1])
+
+                            if scanChoice == None:
+                                continue
+
+                            print("Calling tool {}".format(toolMap[toolChoice]) + (" on file/directory {}".format(containers[scanChoice - 1])) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 0, containers[scanChoice - 1])
                             continue
@@ -137,7 +141,7 @@ while True:
                             #Scan a Docker image with Trivy
                             print("Enter the name of the Docker image you'd like to scan (e.g. aquasec/trivy):")
                             image = user_input(False)
-
+                            print("Calling tool {}".format(toolMap[toolChoice]) + (" on image {}").format(image) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 1, image)
                             continue
@@ -151,7 +155,7 @@ while True:
                 case 3:
                     #Call Tracee scanner
                     scanChoice = None
-                    print("Calling tool {}".format(toolMap[toolChoice]) + (" on file/directory {}".format(containers[scanChoice - 1]) if scanChoice != None else "") + "...")
+                    print("Calling tool {}".format(toolMap[toolChoice]) + "...")
                     scanner = TraceeScanner()
                     scanner.scan(False)
                     continue
