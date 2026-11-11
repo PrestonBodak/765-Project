@@ -5,7 +5,7 @@ class TraceeScanner:
     def __init__(self):
         return
 
-    def scan(self):
+    def scan(self, silent):
         tracee_process = subprocess.Popen(["sudo", "tracee", "--output", "none", "--server", "grpc-address=unix:/var/run/tracee.sock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         time.sleep(3)
@@ -21,7 +21,8 @@ class TraceeScanner:
             #Use tracee to capture a 10 second sample of environment activity
             count = 0
             while count < 20:
-                print("\rScanning" + ("." * (count % 4)) + (" " * (4 - (count % 4))), end="")
+                if not silent:
+                    print("\rScanning" + ("." * (count % 4)) + (" " * (4 - (count % 4))), end="")
                 count = count + 1
                 time.sleep(0.5)
 
@@ -31,5 +32,6 @@ class TraceeScanner:
         tracee_process.terminate()
         tracee_process.wait()
 
-        print("\nScan complete! Results can be found in scan_outputs/tracee_out.txt")
+        if not silent:
+            print("\nScan complete! Results can be found in scan_outputs/tracee_out.txt")
         return
