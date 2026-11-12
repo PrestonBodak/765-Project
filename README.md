@@ -26,4 +26,4 @@ Must be installed such that a valid symlink for `tracee` exists in /usr/local/bi
 
 The most recent Tracee binary can be found here: https://github.com/aquasecurity/tracee/releases
 
-Once you have downloaded the binary for Tracee, link it to a global command with: `sudo ln -s [FULL PATH TO BINARY] /usr/local/bin/[COMMAND]`
+Once you have downloaded the binary for Tracee, link it to a global command with: `sudo ln -s [FULL PATH TO BINARY] /usr/local/bin/tracee`
