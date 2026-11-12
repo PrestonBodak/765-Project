@@ -6,9 +6,6 @@ class TraceeScanner:
         return
 
     def scan(self, silent):
-        tracee_process = subprocess.Popen(["sudo", "tracee", "--output", "none", "--server", "grpc-address=unix:/var/run/tracee.sock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        time.sleep(3)
 
         if os.path.isfile("scan_outputs/tracee_out.txt"):
             #Previous output exists, delete to overwrite
@@ -16,7 +13,7 @@ class TraceeScanner:
 
         with open("scan_outputs/tracee_out.txt", "a") as f:
             #traceectl event can also be run here to filter the event output file
-            traceectl_process = subprocess.Popen(["sudo", "traceectl", "stream"], stdout=f, stderr=f)
+            process = subprocess.Popen(["sudo", "tracee"], stdout=f, stderr=f)
 
             #Use tracee to capture a 10 second sample of environment activity
             count = 0
@@ -26,11 +23,8 @@ class TraceeScanner:
                 count = count + 1
                 time.sleep(0.5)
 
-            traceectl_process.terminate()
-            traceectl_process.wait()
-
-        tracee_process.terminate()
-        tracee_process.wait()
+            process.terminate()
+            process.wait()
 
         if not silent:
             print("\nScan complete! Results can be found in scan_outputs/tracee_out.txt")

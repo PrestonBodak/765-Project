@@ -22,10 +22,8 @@ For Ubuntu or Debian, run:
 
 ### Tracee:
 
-Must be installed such that valid symlinks for `tracee` and `traceectl` exist in /usr/local/bin/ (such that the commands can be run from any directory). Due to the many required libraries to build Tracee but none for traceectl, it is recommended to download the binary for Tracee but to clone the repository and build traceectl from source.
+Must be installed such that a valid symlink for `tracee` exists in /usr/local/bin/ (such that the command can be run from any directory). Due to the many required libraries to build Tracee, it is recommended to download the binary from GitHub.
 
 The most recent Tracee binary can be found here: https://github.com/aquasecurity/tracee/releases
 
-Instructions for building traceectl can be found here: https://aquasecurity.github.io/tracee/latest/traceectl/usage/
-
-Once you have prepared binaries for Tracee and traceectl, link each to a global command with: `sudo ln -s [FULL PATH TO BINARY] /usr/local/bin/[COMMAND]`
+Once you have downloaded the binary for Tracee, link it to a global command with: `sudo ln -s [FULL PATH TO BINARY] /usr/local/bin/[COMMAND]`
