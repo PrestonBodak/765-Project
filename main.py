@@ -17,6 +17,7 @@ Type "help" for a list of commands.
 help_menu = {
              "help" : "Displays a list of valid commands.",
              "singlescan" : "Enables the user to choose a file and tool to perform a scan.",
+             "securityscan" : "Runs the P1 malware gate before later security scans.",
              "envscan" : "Runs a multi-file scan on all files in /containers.",
              "exit" : "Quit the program and return to the shell.",
              "q" : "An alias for \"exit\""
@@ -165,6 +166,33 @@ while True:
                     #Default case
                     print("Tool selection out of range. Exiting singlescan...")
                     continue
+
+            continue
+
+        case "securityscan":
+            global_cmd = "securityscan"
+            containers = os.listdir("./containers")
+
+            if not containers:
+                print("No files found in /containers. Exiting securityscan...")
+                continue
+
+            scanChoice = file_input()
+            if scanChoice == None:
+                continue
+
+            target = containers[scanChoice - 1]
+            print("Running P1 malware gate on {}...".format(target))
+            result = ClamScanner().scan(False, target)
+
+            if result["status"] == "malware":
+                print("Malware detected. Deployment is rejected.")
+                print("Trivy and Tracee will not run.")
+            elif result["status"] == "error":
+                print("ClamAV could not complete the scan.")
+                print("The result is inconclusive; deployment is stopped.")
+            else:
+                print("ClamAV passed. The target is ready for the Trivy stage.")
 
             continue
 
