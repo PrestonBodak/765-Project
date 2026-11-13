@@ -153,11 +153,12 @@ while True:
                     continue
 
                 case 3:
-                    #Call Tracee scanner
-                    scanChoice = None
-                    print("Calling tool {}".format(toolMap[toolChoice]) + "...")
+                    #Call Tracee scanner against a temporary Docker container
+                    print("Enter the name of the Docker image to scan (e.g. aquasec/trivy):")
+                    image = user_input(False)
+                    print("Calling tool {}".format(toolMap[toolChoice]) + " on image {}...".format(image))
                     scanner = TraceeScanner()
-                    scanner.scan(False)
+                    scanner.scan(False, image)
                     continue
 
                 case _:
