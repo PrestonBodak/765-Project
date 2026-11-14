@@ -509,7 +509,32 @@ def restrict_published_ports(candidate_container=None, **kwargs):
     if any(bindings.values()):
         return {"status": "failed", "handler": "restrict_published_ports", "reason": "Candidate still publishes a port."}
     return {"status": "applied", "handler": "restrict_published_ports", "candidate_container": candidate_container}
-def remove_setuid_setgid_permissions(**kwargs): return _unimplemented_handler("remove_setuid_setgid_permissions", **kwargs)
+
+
+def remove_setuid_setgid_permissions(candidate_container=None, **kwargs):
+    if not candidate_container:
+        return _unimplemented_handler("remove_setuid_setgid_permissions", **kwargs)
+    result = _run_in_candidate(
+        candidate_container,
+        [
+            "sh",
+            "-c",
+            "find / -xdev -type f -perm /6000 -exec chmod a-s {} +",
+        ],
+    )
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "handler": "remove_setuid_setgid_permissions",
+            "reason": "Could not remove setuid/setgid permissions.",
+        }
+    return {
+        "status": "applied",
+        "handler": "remove_setuid_setgid_permissions",
+        "candidate_container": candidate_container,
+    }
+
+
 def pin_base_image_version(**kwargs): return _unimplemented_handler("pin_base_image_version", **kwargs)
 def remove_remote_download(**kwargs): return _unimplemented_handler("remove_remote_download", **kwargs)
 def replace_unsafe_add_instruction(**kwargs): return _unimplemented_handler("replace_unsafe_add_instruction", **kwargs)
@@ -539,3 +564,4 @@ PlanExecutor.register_handler("remove_host_ipc", remove_host_ipc)
 PlanExecutor.register_handler("remove_docker_socket_mount", remove_docker_socket_mount)
 PlanExecutor.register_handler("remove_or_narrow_host_mount", remove_or_narrow_host_mount)
 PlanExecutor.register_handler("restrict_published_ports", restrict_published_ports)
+PlanExecutor.register_handler("remove_setuid_setgid_permissions", remove_setuid_setgid_permissions)

@@ -148,6 +148,8 @@ class ReportPlanCreator:
             ("host ipc", "remove_host_ipc"),
             ("ipcmode", "remove_host_ipc"),
             ("capabilit", "drop_unnecessary_capabilities"),
+            ("setuid", "remove_setuid_setgid_permissions"),
+            ("setgid", "remove_setuid_setgid_permissions"),
             ("read-only", "enable_read_only_root_filesystem"),
             ("readonly", "enable_read_only_root_filesystem"),
             ("host mount", "remove_or_narrow_host_mount"),
