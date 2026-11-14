@@ -167,6 +167,10 @@ class ReportPlanCreator:
                 "id": finding["id"],
                 "description": "Review {} in {}.".format(finding["id"], finding["package"]),
                 "executor": executor,
+                "parameters": {
+                    "package": finding["package"],
+                    "fixed_version": finding["fixed_version"],
+                },
                 "status": "pending" if PlanExecutor.can_execute(executor) else "manual_review_required",
                 "approved": False,
             })
@@ -176,6 +180,10 @@ class ReportPlanCreator:
                 "id": "secret-{}".format(finding["file"]),
                 "description": "Review the possible secret in {}.".format(finding["file"]),
                 "executor": executor,
+                "parameters": {
+                    "file": finding["file"],
+                    "line": finding["line"],
+                },
                 "status": "pending" if PlanExecutor.can_execute(executor) else "manual_review_required",
                 "approved": False,
             })

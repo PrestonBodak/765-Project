@@ -1,4 +1,6 @@
 import json
+import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -72,7 +74,9 @@ class PlanExecutor:
                 "action": action.get("id"),
                 "reason": self.handler_spec(action.get("executor")) or "No handler is registered.",
             }
-        return handler(**kwargs)
+        handler_kwargs = dict(action.get("parameters", {}))
+        handler_kwargs.update(kwargs)
+        return handler(**handler_kwargs)
 
     def execute_plan(self, plan, image, run_dir, verify=None):
         """Apply approved actions to a candidate and verify each one."""
@@ -303,13 +307,11 @@ def _unimplemented_handler(name, **kwargs):
     }
 
 
-def update_image_package(**kwargs): return _unimplemented_handler("update_image_package", **kwargs)
 def update_base_image(**kwargs): return _unimplemented_handler("update_base_image", **kwargs)
 def update_language_dependency(**kwargs): return _unimplemented_handler("update_language_dependency", **kwargs)
 def replace_image(**kwargs): return _unimplemented_handler("replace_image", **kwargs)
 def remove_secret_from_source(**kwargs): return _unimplemented_handler("remove_secret_from_source", **kwargs)
 def replace_secret_with_runtime_value(**kwargs): return _unimplemented_handler("replace_secret_with_runtime_value", **kwargs)
-def remove_secret_from_image(**kwargs): return _unimplemented_handler("remove_secret_from_image", **kwargs)
 def verify_secret_removed(**kwargs): return _unimplemented_handler("verify_secret_removed", **kwargs)
 def set_non_root_user(**kwargs): return _unimplemented_handler("set_non_root_user", **kwargs)
 def _inspect_candidate(candidate_container, field):
@@ -395,6 +397,90 @@ def _candidate_json(candidate_container, field):
         return None
 
 
+def _run_in_candidate(candidate_container, command):
+    return subprocess.run(
+        ["sudo", "docker", "exec", candidate_container] + command,
+        capture_output=True,
+        text=True,
+    )
+
+
+def update_image_package(candidate_container=None, package=None, fixed_version=None, **kwargs):
+    """Update one Trivy package inside the isolated candidate container."""
+    if not candidate_container or not package or not fixed_version:
+        return _unimplemented_handler("update_image_package", **kwargs)
+    safe_value = re.compile(r"^[A-Za-z0-9.+_:@=-]+$")
+    if not safe_value.fullmatch(package) or not safe_value.fullmatch(fixed_version):
+        return {
+            "status": "manual_review_required",
+            "handler": "update_image_package",
+            "reason": "Package values contain unsupported characters.",
+        }
+
+    managers = [
+        (
+            ["apt-get", "--version"],
+            ["apt-get", "update"],
+            ["apt-get", "install", "-y", "{}={}".format(package, fixed_version)],
+        ),
+        (
+            ["apk", "--version"],
+            ["apk", "update"],
+            ["apk", "add", "{}={}".format(package, fixed_version)],
+        ),
+    ]
+    for probe, update, install in managers:
+        if _run_in_candidate(candidate_container, probe).returncode != 0:
+            continue
+        if _run_in_candidate(candidate_container, update).returncode != 0:
+            return {"status": "failed", "handler": "update_image_package", "reason": "Package index update failed."}
+        if _run_in_candidate(candidate_container, install).returncode != 0:
+            return {"status": "failed", "handler": "update_image_package", "reason": "Package update failed."}
+        return {
+            "status": "applied",
+            "handler": "update_image_package",
+            "package": package,
+            "fixed_version": fixed_version,
+        }
+
+    return {
+        "status": "manual_review_required",
+        "handler": "update_image_package",
+        "reason": "The candidate does not provide a supported package manager.",
+    }
+
+
+def remove_secret_from_image(candidate_container=None, file=None, line=None, **kwargs):
+    """Remove the reported secret line from the isolated candidate filesystem."""
+    if not candidate_container or not file or line in (None, "unknown"):
+        return _unimplemented_handler("remove_secret_from_image", **kwargs)
+    try:
+        line_number = int(line)
+    except (TypeError, ValueError):
+        return _unimplemented_handler("remove_secret_from_image", **kwargs)
+    if line_number < 1 or file.startswith("/") or ".." in Path(file).parts:
+        return {
+            "status": "manual_review_required",
+            "handler": "remove_secret_from_image",
+            "reason": "The reported secret path is not safe to edit automatically.",
+        }
+
+    target = "/" + file
+    command = ["sh", "-c", "sed -i '{}d' -- {}".format(line_number, shlex.quote(target))]
+    if _run_in_candidate(candidate_container, command).returncode != 0:
+        return {
+            "status": "failed",
+            "handler": "remove_secret_from_image",
+            "reason": "Could not remove the reported secret line.",
+        }
+    return {
+        "status": "applied",
+        "handler": "remove_secret_from_image",
+        "file": file,
+        "line": line_number,
+    }
+
+
 def remove_docker_socket_mount(candidate_container=None, **kwargs):
     mounts = _candidate_json(candidate_container, "{{json .Mounts}}")
     if mounts is None:
@@ -442,6 +528,8 @@ def promote_candidate_image(**kwargs): return _unimplemented_handler("promote_ca
 
 
 PlanExecutor.register_handler("remove_privileged_mode", remove_privileged_mode)
+PlanExecutor.register_handler("update_image_package", update_image_package)
+PlanExecutor.register_handler("remove_secret_from_image", remove_secret_from_image)
 PlanExecutor.register_handler("drop_unnecessary_capabilities", drop_unnecessary_capabilities)
 PlanExecutor.register_handler("enable_no_new_privileges", enable_no_new_privileges)
 PlanExecutor.register_handler("enable_read_only_root_filesystem", enable_read_only_root_filesystem)
