@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import tarfile
+import uuid
 from pathlib import Path
 
 
@@ -72,6 +73,140 @@ class PlanExecutor:
                 "reason": self.handler_spec(action.get("executor")) or "No handler is registered.",
             }
         return handler(**kwargs)
+
+    def execute_plan(self, plan, image, run_dir, verify=None):
+        """Apply approved actions to a candidate and verify each one."""
+        actions = [action for action in plan.get("actions", []) if action.get("approved")]
+        if not actions:
+            plan["decision"] = "no_changes_requested"
+            return {"status": "no_changes_requested", "actions": []}
+
+        for action in actions:
+            if not self.can_execute(action.get("executor")):
+                action["status"] = "manual_review_required"
+                action["execution"] = self.execute(action)
+                plan["decision"] = "manual_review_required"
+                return {"status": "manual_review_required", "action": action["id"]}
+
+        if verify is None:
+            plan["decision"] = "verification_required"
+            return {"status": "verification_required", "actions": []}
+
+        candidate = self.create_candidate(image, run_dir, actions)
+        if candidate is None:
+            plan["decision"] = "candidate_creation_failed"
+            return {"status": "candidate_creation_failed", "actions": []}
+
+        plan["candidate_image"] = candidate["image"]
+        for action in actions:
+            result = self.execute(
+                action,
+                image=image,
+                candidate_container=candidate["container"],
+                candidate_image=candidate["image"],
+                run_dir=run_dir,
+                plan=plan,
+            )
+            action["execution"] = result
+            if result.get("status") != "applied":
+                action["status"] = result.get("status", "failed")
+                self.rollback_candidate(candidate)
+                plan["decision"] = "rolled_back"
+                return {"status": "rolled_back", "action": action["id"]}
+
+            if not self.commit_candidate(candidate):
+                action["status"] = "candidate_commit_failed"
+                self.rollback_candidate(candidate)
+                plan["decision"] = "rolled_back"
+                return {"status": "rolled_back", "action": action["id"]}
+
+            verification = verify(candidate["image"], action, plan)
+            action["verification"] = verification
+            if verification.get("status") != "passed":
+                action["status"] = "verification_failed"
+                self.rollback_candidate(candidate)
+                plan["decision"] = "rolled_back"
+                return {"status": "rolled_back", "action": action["id"]}
+
+            action["status"] = "completed"
+
+        promoted = self.promote_candidate(candidate)
+        if promoted.get("status") != "promoted":
+            self.rollback_candidate(candidate)
+            plan["decision"] = "rolled_back"
+            return {"status": "rolled_back", "actions": actions}
+
+        plan["decision"] = "changes_applied"
+        return {"status": "changes_applied", "actions": actions}
+
+    def create_candidate(self, image, run_dir, actions=None):
+        """Create an isolated candidate container and image tag."""
+        run_name = "{}_{}".format(Path(run_dir).name, uuid.uuid4().hex[:6])
+        name = "securityscan-{}-candidate".format(run_name)
+        image_tag = "securityscan/{}:candidate".format(run_name)
+        command = ["sudo", "docker", "create", "--name", name]
+        executors = {action.get("executor") for action in actions or []}
+        if "drop_unnecessary_capabilities" in executors:
+            command.extend(["--cap-drop", "ALL"])
+        if "enable_no_new_privileges" in executors:
+            command.extend(["--security-opt", "no-new-privileges"])
+        if "enable_read_only_root_filesystem" in executors:
+            command.append("--read-only")
+        # Docker uses private namespaces and no host mounts/ports by default.
+        # These options deliberately stay absent for the corresponding fixes.
+        command.append(image)
+        create = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+        )
+        if create.returncode != 0:
+            return None
+
+        start = subprocess.run(
+            ["sudo", "docker", "start", name],
+            capture_output=True,
+            text=True,
+        )
+        if start.returncode != 0:
+            subprocess.run(
+                ["sudo", "docker", "rm", "-f", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return None
+
+        return {"container": name, "image": image_tag}
+
+    def commit_candidate(self, candidate):
+        result = subprocess.run(
+            ["sudo", "docker", "commit", candidate["container"], candidate["image"]],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    def rollback_candidate(self, candidate):
+        subprocess.run(
+            ["sudo", "docker", "rm", "-f", candidate["container"]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["sudo", "docker", "rmi", "-f", candidate["image"]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def promote_candidate(self, candidate):
+        if not self.commit_candidate(candidate):
+            return {"status": "promotion_failed"}
+        subprocess.run(
+            ["sudo", "docker", "rm", "-f", candidate["container"]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"status": "promoted", "image": candidate["image"]}
 
     def image_id(self, image):
         result = subprocess.run(
@@ -177,10 +312,77 @@ def replace_secret_with_runtime_value(**kwargs): return _unimplemented_handler("
 def remove_secret_from_image(**kwargs): return _unimplemented_handler("remove_secret_from_image", **kwargs)
 def verify_secret_removed(**kwargs): return _unimplemented_handler("verify_secret_removed", **kwargs)
 def set_non_root_user(**kwargs): return _unimplemented_handler("set_non_root_user", **kwargs)
-def remove_privileged_mode(**kwargs): return _unimplemented_handler("remove_privileged_mode", **kwargs)
-def drop_unnecessary_capabilities(**kwargs): return _unimplemented_handler("drop_unnecessary_capabilities", **kwargs)
-def enable_no_new_privileges(**kwargs): return _unimplemented_handler("enable_no_new_privileges", **kwargs)
-def enable_read_only_root_filesystem(**kwargs): return _unimplemented_handler("enable_read_only_root_filesystem", **kwargs)
+def _inspect_candidate(candidate_container, field):
+    result = subprocess.run(
+        ["sudo", "docker", "inspect", "--format", field, candidate_container],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _verified_runtime_handler(name, candidate_container, expected, field):
+    if not candidate_container:
+        return _unimplemented_handler(name)
+    actual = _inspect_candidate(candidate_container, field)
+    if actual is None:
+        return {"status": "failed", "handler": name, "reason": "Could not inspect the candidate."}
+    if actual != expected:
+        return {
+            "status": "failed",
+            "handler": name,
+            "reason": "Candidate setting did not match the requested value.",
+            "expected": expected,
+            "actual": actual,
+        }
+    return {"status": "applied", "handler": name, "candidate_container": candidate_container}
+
+
+def remove_privileged_mode(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "remove_privileged_mode", candidate_container, "false", "{{.HostConfig.Privileged}}"
+    )
+
+
+def drop_unnecessary_capabilities(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "drop_unnecessary_capabilities", candidate_container, '["ALL"]', "{{json .HostConfig.CapDrop}}"
+    )
+
+
+def enable_no_new_privileges(candidate_container=None, **kwargs):
+    security_opt = _inspect_candidate(candidate_container, "{{json .HostConfig.SecurityOpt}}")
+    if security_opt is None:
+        return {"status": "failed", "handler": "enable_no_new_privileges", "reason": "Could not inspect the candidate."}
+    if "no-new-privileges" not in security_opt:
+        return {"status": "failed", "handler": "enable_no_new_privileges", "reason": "Candidate does not enable no-new-privileges."}
+    return {"status": "applied", "handler": "enable_no_new_privileges", "candidate_container": candidate_container}
+
+
+def enable_read_only_root_filesystem(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "enable_read_only_root_filesystem", candidate_container, "true", "{{.HostConfig.ReadonlyRootfs}}"
+    )
+
+
+def remove_host_network(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "remove_host_network", candidate_container, "default", "{{.HostConfig.NetworkMode}}"
+    )
+
+
+def remove_host_pid(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "remove_host_pid", candidate_container, "", "{{.HostConfig.PidMode}}"
+    )
+
+
+def remove_host_ipc(candidate_container=None, **kwargs):
+    return _verified_runtime_handler(
+        "remove_host_ipc", candidate_container, "", "{{.HostConfig.IpcMode}}"
+    )
 def remove_setuid_setgid_permissions(**kwargs): return _unimplemented_handler("remove_setuid_setgid_permissions", **kwargs)
 def pin_base_image_version(**kwargs): return _unimplemented_handler("pin_base_image_version", **kwargs)
 def remove_remote_download(**kwargs): return _unimplemented_handler("remove_remote_download", **kwargs)
@@ -188,9 +390,6 @@ def replace_unsafe_add_instruction(**kwargs): return _unimplemented_handler("rep
 def add_healthcheck(**kwargs): return _unimplemented_handler("add_healthcheck", **kwargs)
 def remove_docker_socket_mount(**kwargs): return _unimplemented_handler("remove_docker_socket_mount", **kwargs)
 def remove_or_narrow_host_mount(**kwargs): return _unimplemented_handler("remove_or_narrow_host_mount", **kwargs)
-def remove_host_network(**kwargs): return _unimplemented_handler("remove_host_network", **kwargs)
-def remove_host_pid(**kwargs): return _unimplemented_handler("remove_host_pid", **kwargs)
-def remove_host_ipc(**kwargs): return _unimplemented_handler("remove_host_ipc", **kwargs)
 def restrict_published_ports(**kwargs): return _unimplemented_handler("restrict_published_ports", **kwargs)
 def add_cpu_limit(**kwargs): return _unimplemented_handler("add_cpu_limit", **kwargs)
 def add_memory_limit(**kwargs): return _unimplemented_handler("add_memory_limit", **kwargs)
@@ -203,3 +402,12 @@ def rerun_security_scan(**kwargs): return _unimplemented_handler("rerun_security
 def compare_before_after_results(**kwargs): return _unimplemented_handler("compare_before_after_results", **kwargs)
 def rollback_candidate(**kwargs): return _unimplemented_handler("rollback_candidate", **kwargs)
 def promote_candidate_image(**kwargs): return _unimplemented_handler("promote_candidate_image", **kwargs)
+
+
+PlanExecutor.register_handler("remove_privileged_mode", remove_privileged_mode)
+PlanExecutor.register_handler("drop_unnecessary_capabilities", drop_unnecessary_capabilities)
+PlanExecutor.register_handler("enable_no_new_privileges", enable_no_new_privileges)
+PlanExecutor.register_handler("enable_read_only_root_filesystem", enable_read_only_root_filesystem)
+PlanExecutor.register_handler("remove_host_network", remove_host_network)
+PlanExecutor.register_handler("remove_host_pid", remove_host_pid)
+PlanExecutor.register_handler("remove_host_ipc", remove_host_ipc)

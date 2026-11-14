@@ -39,6 +39,40 @@ class SecurityScan:
             return "raw/{}".format(destination)
         return None
 
+    def _verify_candidate(self, candidate_image, action, plan):
+        """Run the existing scanners against a candidate image."""
+        verification_dir = self.run_dir / "verification"
+        filesystem_dir = self.executor.export_filesystem(
+            candidate_image, verification_dir
+        )
+        if filesystem_dir is None:
+            return {"status": "failed", "reason": "Could not export candidate filesystem."}
+
+        try:
+            clam_result = ClamScanner().scan_path(True, str(filesystem_dir))
+        finally:
+            self.executor.remove_export(verification_dir)
+
+        if clam_result["status"] != "clean":
+            return {"status": "failed", "reason": "ClamAV rejected the candidate.", "clamav": clam_result}
+
+        TrivyScanner().scan(True, 1, candidate_image)
+        self.executor.redact_secret_values()
+        trivy_report = self.report_creator._load_trivy_report()
+        if trivy_report is None:
+            return {"status": "failed", "reason": "Trivy did not produce valid JSON."}
+
+        TraceeScanner().scan(True, candidate_image)
+        tracee_output = Path("scan_outputs/tracee_out.txt")
+        if not tracee_output.exists():
+            return {"status": "failed", "reason": "Tracee did not produce output."}
+
+        return {
+            "status": "passed",
+            "candidate_image": candidate_image,
+            "action": action.get("id"),
+        }
+
     def _reject_image(self):
         answer = input(
             "Rejecting this image stops the plan. The candidate will be discarded "
@@ -197,17 +231,14 @@ class SecurityScan:
             print("Plan saved. No changes were applied.")
             return True
 
-        for action in actions:
-            if action.get("approved"):
-                action["execution"] = self.executor.execute(
-                    action, image=self.image, run_dir=self.run_dir, plan=self.plan
-                )
-                if action["execution"]["status"] == "manual_review_required":
-                    action["status"] = "manual_review_required"
-
-        self.plan["decision"] = "changes_applied"
+        execution = self.executor.execute_plan(
+            self.plan,
+            self.image,
+            self.run_dir,
+            verify=self._verify_candidate,
+        )
         self._save()
-        print("Approved changes were submitted to the plan executor.")
+        print("Plan execution result: {}".format(execution["status"]))
         return True
 
     def run(self, silent=False):
