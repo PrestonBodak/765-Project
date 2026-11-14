@@ -131,6 +131,34 @@ class ReportPlanCreator:
             print("- {} [{}] in {}".format(finding["title"], finding["severity"], finding["target"]))
             print("  Recommended action: {}".format(finding["resolution"]))
 
+    @staticmethod
+    def _misconfiguration_executor(finding):
+        text = " ".join(
+            str(finding.get(field, ""))
+            for field in ("id", "title", "description", "resolution")
+        ).lower()
+        matches = (
+            ("docker socket", "remove_docker_socket_mount"),
+            ("docker.sock", "remove_docker_socket_mount"),
+            ("privileged", "remove_privileged_mode"),
+            ("host network", "remove_host_network"),
+            ("network_mode: host", "remove_host_network"),
+            ("host pid", "remove_host_pid"),
+            ("pidmode", "remove_host_pid"),
+            ("host ipc", "remove_host_ipc"),
+            ("ipcmode", "remove_host_ipc"),
+            ("capabilit", "drop_unnecessary_capabilities"),
+            ("read-only", "enable_read_only_root_filesystem"),
+            ("readonly", "enable_read_only_root_filesystem"),
+            ("host mount", "remove_or_narrow_host_mount"),
+            ("bind mount", "remove_or_narrow_host_mount"),
+            ("published port", "restrict_published_ports"),
+        )
+        for phrase, executor in matches:
+            if phrase in text:
+                return executor
+        return "fix_misconfiguration_{}".format(finding["id"])
+
     def actions_for(self, vulnerabilities, secrets, misconfigurations):
         actions = []
         for finding in vulnerabilities:
@@ -143,7 +171,7 @@ class ReportPlanCreator:
                 "approved": False,
             })
         for finding in secrets:
-            executor = "remove_secret"
+            executor = "remove_secret_from_image"
             actions.append({
                 "id": "secret-{}".format(finding["file"]),
                 "description": "Review the possible secret in {}.".format(finding["file"]),
@@ -152,7 +180,7 @@ class ReportPlanCreator:
                 "approved": False,
             })
         for finding in misconfigurations:
-            executor = "fix_misconfiguration_{}".format(finding["id"])
+            executor = self._misconfiguration_executor(finding)
             actions.append({
                 "id": finding["id"],
                 "description": finding["title"],
