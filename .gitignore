@@ -5,6 +5,10 @@ __pycache__/
 scan_outputs/*
 !scan_outputs/.gitkeep
 
+# Per-run security scan reports and raw evidence
+scan_runs/*
+!scan_runs/.gitkeep
+
 # Downloaded and locally built container test artifacts
 containers/*
 !containers/test1.txt

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 
@@ -6,13 +7,16 @@ class ClamScanner:
         return
 
     def scan(self, silent, target):
+        return self.scan_path(silent, os.path.join("containers", target))
+
+    def scan_path(self, silent, target):
         try:
             process = subprocess.Popen(
                 [
                     "clamscan",
                     "--log=scan_outputs/clam_out.txt",
                     "--recursive",
-                    "containers/{}".format(target),
+                    target,
                 ],
                 stdout=subprocess.DEVNULL,
             )

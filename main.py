@@ -1,6 +1,9 @@
 #Imports TBD
 import sys, os
 from ClamScanner import ClamScanner
+from PlanExecutor import PlanExecutor
+from ReportPlanCreator import ReportPlanCreator
+from SecurityScan import SecurityScan
 from TraceeScanner import TraceeScanner
 from TrivyScanner import TrivyScanner
 
@@ -17,7 +20,7 @@ Type "help" for a list of commands.
 help_menu = {
              "help" : "Displays a list of valid commands.",
              "singlescan" : "Enables the user to choose a file and tool to perform a scan.",
-             "securityscan" : "Runs the P1 malware gate before later security scans.",
+             "securityscan" : "Runs ClamAV, Trivy, and Tracee and creates a report and plan.",
              "envscan" : "Runs a multi-file scan on all files in /containers.",
              "exit" : "Quit the program and return to the shell.",
              "q" : "An alias for \"exit\""
@@ -136,6 +139,11 @@ while True:
                             print("Calling tool {}".format(toolMap[toolChoice]) + (" on file/directory {}".format(containers[scanChoice - 1])) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 0, containers[scanChoice - 1])
+                            PlanExecutor().redact_secret_values()
+                            creator = ReportPlanCreator()
+                            creator.print_vulnerability_summary(creator.summarize_vulnerabilities())
+                            creator.print_secret_summary(creator.summarize_secrets())
+                            creator.print_misconfiguration_summary(creator.summarize_misconfigurations())
                             continue
 
                         case 2:
@@ -145,6 +153,11 @@ while True:
                             print("Calling tool {}".format(toolMap[toolChoice]) + (" on image {}").format(image) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 1, image)
+                            PlanExecutor().redact_secret_values()
+                            creator = ReportPlanCreator()
+                            creator.print_vulnerability_summary(creator.summarize_vulnerabilities())
+                            creator.print_secret_summary(creator.summarize_secrets())
+                            creator.print_misconfiguration_summary(creator.summarize_misconfigurations())
                             continue
 
                         case _:
@@ -171,28 +184,9 @@ while True:
 
         case "securityscan":
             global_cmd = "securityscan"
-            containers = os.listdir("./containers")
-
-            if not containers:
-                print("No files found in /containers. Exiting securityscan...")
-                continue
-
-            scanChoice = file_input()
-            if scanChoice == None:
-                continue
-
-            target = containers[scanChoice - 1]
-            print("Running P1 malware gate on {}...".format(target))
-            result = ClamScanner().scan(False, target)
-
-            if result["status"] == "malware":
-                print("Malware detected. Deployment is rejected.")
-                print("Trivy and Tracee will not run.")
-            elif result["status"] == "error":
-                print("ClamAV could not complete the scan.")
-                print("The result is inconclusive; deployment is stopped.")
-            else:
-                print("ClamAV passed. The target is ready for the Trivy stage.")
+            print("Enter the Docker image to scan (e.g. gitea:latest):")
+            image = user_input(False)
+            SecurityScan(image).run(False)
 
             continue
 

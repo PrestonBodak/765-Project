@@ -1,26 +1,32 @@
-import subprocess, time, os
+import os
+import subprocess
+import time
+
 
 class TrivyScanner:
     def __init__(self):
         return
 
     def scan(self, silent, scanType, target):
-        #scanType - 0 = File/Directory, 1 = Image, ...
+        # scanType - 0 = File/Directory, 1 = Image, ...
+        if os.path.isfile("scan_outputs/trivy_out.json"):
+            os.remove("scan_outputs/trivy_out.json")
 
-        if os.path.isfile("scan_outputs/trivy_out.txt"):
-            #Previous output exists, delete to overwrite
-            os.remove("scan_outputs/trivy_out.txt")
-
-        with open("scan_outputs/trivy_out.txt", "a") as f:
-            #Trivy has lots of features, so use switch/case for implementing future scan types.
+        with open("scan_outputs/trivy_out.json", "w") as output_file, open("scan_outputs/trivy_err.txt", "w") as error_file:
+            # Trivy only runs the scan. Report parsing belongs to ReportPlanCreator.
             match scanType:
                 case 0:
-                    #Scan a target file/directory
-                    process = subprocess.Popen(["sudo", "trivy", "fs", "--scanners", "vuln,secret,misconfig", "./containers/" + target], stdout=f, stderr=f)
-
+                    process = subprocess.Popen(
+                        ["sudo", "trivy", "fs", "--scanners", "vuln,secret,misconfig", "--format", "json", "./containers/" + target],
+                        stdout=output_file,
+                        stderr=error_file,
+                    )
                 case 1:
-                    #Scan a target Docker image
-                    process = subprocess.Popen(["sudo", "trivy", "image", target], stdout=f, stderr=f)
+                    process = subprocess.Popen(
+                        ["sudo", "trivy", "image", "--scanners", "vuln,secret,misconfig", "--format", "json", target],
+                        stdout=output_file,
+                        stderr=error_file,
+                    )
 
             count = 0
             while process.poll() is None:
@@ -30,4 +36,4 @@ class TrivyScanner:
                 time.sleep(0.5)
 
             if not silent:
-                print("\nScan complete! Results can be found in scan_outputs/trivy_out.txt")
+                print("\nScan complete! Results can be found in scan_outputs/trivy_out.json")
