@@ -383,14 +383,51 @@ def remove_host_ipc(candidate_container=None, **kwargs):
     return _verified_runtime_handler(
         "remove_host_ipc", candidate_container, "", "{{.HostConfig.IpcMode}}"
     )
+
+
+def _candidate_json(candidate_container, field):
+    value = _inspect_candidate(candidate_container, field)
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def remove_docker_socket_mount(candidate_container=None, **kwargs):
+    mounts = _candidate_json(candidate_container, "{{json .Mounts}}")
+    if mounts is None:
+        return {"status": "failed", "handler": "remove_docker_socket_mount", "reason": "Could not inspect candidate mounts."}
+    for mount in mounts:
+        source = mount.get("Source", "")
+        destination = mount.get("Destination", "")
+        if "docker.sock" in source or "docker.sock" in destination:
+            return {"status": "failed", "handler": "remove_docker_socket_mount", "reason": "Candidate still exposes the Docker socket."}
+    return {"status": "applied", "handler": "remove_docker_socket_mount", "candidate_container": candidate_container}
+
+
+def remove_or_narrow_host_mount(candidate_container=None, **kwargs):
+    mounts = _candidate_json(candidate_container, "{{json .Mounts}}")
+    if mounts is None:
+        return {"status": "failed", "handler": "remove_or_narrow_host_mount", "reason": "Could not inspect candidate mounts."}
+    if any(mount.get("Type") == "bind" for mount in mounts):
+        return {"status": "failed", "handler": "remove_or_narrow_host_mount", "reason": "Candidate still has a host bind mount."}
+    return {"status": "applied", "handler": "remove_or_narrow_host_mount", "candidate_container": candidate_container}
+
+
+def restrict_published_ports(candidate_container=None, **kwargs):
+    bindings = _candidate_json(candidate_container, "{{json .HostConfig.PortBindings}}")
+    if bindings is None:
+        return {"status": "failed", "handler": "restrict_published_ports", "reason": "Could not inspect candidate ports."}
+    if any(bindings.values()):
+        return {"status": "failed", "handler": "restrict_published_ports", "reason": "Candidate still publishes a port."}
+    return {"status": "applied", "handler": "restrict_published_ports", "candidate_container": candidate_container}
 def remove_setuid_setgid_permissions(**kwargs): return _unimplemented_handler("remove_setuid_setgid_permissions", **kwargs)
 def pin_base_image_version(**kwargs): return _unimplemented_handler("pin_base_image_version", **kwargs)
 def remove_remote_download(**kwargs): return _unimplemented_handler("remove_remote_download", **kwargs)
 def replace_unsafe_add_instruction(**kwargs): return _unimplemented_handler("replace_unsafe_add_instruction", **kwargs)
 def add_healthcheck(**kwargs): return _unimplemented_handler("add_healthcheck", **kwargs)
-def remove_docker_socket_mount(**kwargs): return _unimplemented_handler("remove_docker_socket_mount", **kwargs)
-def remove_or_narrow_host_mount(**kwargs): return _unimplemented_handler("remove_or_narrow_host_mount", **kwargs)
-def restrict_published_ports(**kwargs): return _unimplemented_handler("restrict_published_ports", **kwargs)
 def add_cpu_limit(**kwargs): return _unimplemented_handler("add_cpu_limit", **kwargs)
 def add_memory_limit(**kwargs): return _unimplemented_handler("add_memory_limit", **kwargs)
 def add_process_limit(**kwargs): return _unimplemented_handler("add_process_limit", **kwargs)
@@ -411,3 +448,6 @@ PlanExecutor.register_handler("enable_read_only_root_filesystem", enable_read_on
 PlanExecutor.register_handler("remove_host_network", remove_host_network)
 PlanExecutor.register_handler("remove_host_pid", remove_host_pid)
 PlanExecutor.register_handler("remove_host_ipc", remove_host_ipc)
+PlanExecutor.register_handler("remove_docker_socket_mount", remove_docker_socket_mount)
+PlanExecutor.register_handler("remove_or_narrow_host_mount", remove_or_narrow_host_mount)
+PlanExecutor.register_handler("restrict_published_ports", restrict_published_ports)
