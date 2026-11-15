@@ -134,13 +134,14 @@ class PlanExecutor:
 
             action["status"] = "completed"
 
-        promoted = self.promote_candidate(candidate)
+        promoted = self.promote_candidate(candidate, run_dir)
         if promoted.get("status") != "promoted":
             self.rollback_candidate(candidate)
             plan["decision"] = "rolled_back"
             return {"status": "rolled_back", "actions": actions}
 
         plan["decision"] = "changes_applied"
+        plan["candidate_archive"] = promoted["archive"]
         return {"status": "changes_applied", "actions": actions}
 
     def create_candidate(self, image, run_dir, actions=None):
@@ -202,15 +203,29 @@ class PlanExecutor:
             stderr=subprocess.DEVNULL,
         )
 
-    def promote_candidate(self, candidate):
+    def promote_candidate(self, candidate, run_dir):
         if not self.commit_candidate(candidate):
             return {"status": "promotion_failed"}
+        archive_dir = Path("containers") / "securityscan"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = (archive_dir / "{}-fixed.tar".format(Path(run_dir).name)).resolve()
+        saved = subprocess.run(
+            ["sudo", "docker", "save", "--output", str(archive_path), candidate["image"]],
+            capture_output=True,
+            text=True,
+        )
+        if saved.returncode != 0:
+            return {"status": "promotion_failed", "reason": "Could not save the candidate archive."}
         subprocess.run(
             ["sudo", "docker", "rm", "-f", candidate["container"]],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return {"status": "promoted", "image": candidate["image"]}
+        return {
+            "status": "promoted",
+            "image": candidate["image"],
+            "archive": str(archive_path),
+        }
 
     def image_id(self, image):
         result = subprocess.run(

@@ -92,6 +92,42 @@ class SecurityScan:
 
     def _review_vulnerabilities(self, findings, actions):
         self.plan.setdefault("reviews", {})["vulnerabilities"] = "in_progress"
+        fixable = [
+            (finding, action)
+            for finding, action in zip(findings, actions)
+            if finding["can_update"]
+        ]
+        if fixable:
+            print("\n[f] Accept all available fixes")
+        print("[i] Review vulnerabilities individually")
+        print("[r] Reject the image")
+        while True:
+            choice = input("Choose an action: ").strip().lower()
+            if choice in {"i", "r"} or (choice == "f" and fixable):
+                break
+            print("Choose one of the displayed options.")
+
+        if choice == "r":
+            self._save()
+            return not self._reject_image()
+        if choice == "f":
+            for finding, action in fixable:
+                action["approved"] = True
+                action["status"] = "approved"
+                action["decision"] = "accept_fix"
+            self._save()
+            remaining = [
+                (finding, action)
+                for finding, action in zip(findings, actions)
+                if not finding["can_update"]
+            ]
+            findings = [finding for finding, _ in remaining]
+            actions = [action for _, action in remaining]
+            if not findings:
+                self.plan["reviews"]["vulnerabilities"] = "completed"
+                self._save()
+                return True
+
         for finding, action in zip(findings, actions):
             print("\n{} [{}] - {}".format(
                 finding["id"], finding["severity"], finding["package"]
@@ -177,6 +213,9 @@ class SecurityScan:
         }
         print("\nSecurity findings")
         print("Vulnerabilities: {}".format(len(vulnerabilities)))
+        fixable = sum(finding["can_update"] for finding in vulnerabilities)
+        print("  With available fixes: {}".format(fixable))
+        print("  Without available fixes: {}".format(len(vulnerabilities) - fixable))
         for severity, count in sorted(Counter(
             f["severity"].upper() for f in vulnerabilities
         ).items()):
@@ -237,6 +276,10 @@ class SecurityScan:
             self.run_dir,
             verify=self._verify_candidate,
         )
+        if self.plan.get("candidate_archive"):
+            self.report["candidate_image"] = self.plan.get("candidate_image")
+            self.report["candidate_archive"] = self.plan["candidate_archive"]
+            print("Fixed image retained locally: {}".format(self.plan["candidate_archive"]))
         self._save()
         print("Plan execution result: {}".format(execution["status"]))
         return True
@@ -253,7 +296,7 @@ class SecurityScan:
             return self.report, self.plan
 
         try:
-            clam_result = ClamScanner().scan_path(silent, str(filesystem_dir))
+            clam_result = ClamScanner().scan_path(True, str(filesystem_dir))
             clam_output = self._copy_output(
                 "scan_outputs/clam_out.txt", "clam_out.txt"
             )
@@ -302,7 +345,7 @@ class SecurityScan:
             self.report_creator.actions_for(vulnerabilities, secrets, misconfigurations)
         )
 
-        TraceeScanner().scan(silent, self.image)
+        TraceeScanner().scan(True, self.image)
         tracee_output = self._copy_output(
             "scan_outputs/tracee_out.txt", "tracee_out.txt"
         )
