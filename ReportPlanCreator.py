@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from PlanExecutor import PlanExecutor
+from ScanPaths import SCAN_DIR
 
 
 class ReportPlanCreator:
@@ -31,7 +32,8 @@ class ReportPlanCreator:
         with open(run_dir / "plan.json", "w") as plan_file:
             json.dump(plan, plan_file, indent=2)
 
-    def _load_trivy_report(self, report_path="scan_outputs/trivy_out.json"):
+    def _load_trivy_report(self, report_path=None):
+        report_path = SCAN_DIR / "trivy_out.json" if report_path is None else report_path
         try:
             with open(report_path, "r") as report_file:
                 return json.load(report_file)

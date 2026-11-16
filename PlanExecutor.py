@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 import uuid
 from pathlib import Path
+from ScanPaths import FIXED_DIR, SCAN_DIR
 
 
 class PlanExecutor:
@@ -206,7 +207,7 @@ class PlanExecutor:
     def promote_candidate(self, candidate, run_dir):
         if not self.commit_candidate(candidate):
             return {"status": "promotion_failed"}
-        archive_dir = Path("containers") / "securityscan"
+        archive_dir = FIXED_DIR
         archive_dir.mkdir(parents=True, exist_ok=True)
         archive_path = (archive_dir / "{}-fixed.tar".format(Path(run_dir).name)).resolve()
         saved = subprocess.run(
@@ -238,7 +239,7 @@ class PlanExecutor:
         return None
 
     def export_filesystem(self, image, run_dir):
-        export_dir = Path("containers") / ".securityscan" / Path(run_dir).name
+        export_dir = Path(run_dir) / "container"
         export_dir.mkdir(parents=True, exist_ok=True)
         archive_path = export_dir / "filesystem.tar"
 
@@ -283,12 +284,13 @@ class PlanExecutor:
         return tarfile.data_filter(member, destination)
 
     def remove_export(self, run_dir):
-        export_dir = Path("containers") / ".securityscan" / Path(run_dir).name
+        export_dir = Path(run_dir) / "container"
         if export_dir.exists():
             shutil.rmtree(export_dir)
 
-    def redact_secret_values(self, report_path="scan_outputs/trivy_out.json"):
+    def redact_secret_values(self, report_path=None):
         """Remove secret contents before a report is copied or shared."""
+        report_path = SCAN_DIR / "trivy_out.json" if report_path is None else report_path
         try:
             with open(report_path, "r") as report_file:
                 report = json.load(report_file)

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from ScanPaths import SCAN_DIR
 
 
 class TrivyScanner:
@@ -9,10 +10,13 @@ class TrivyScanner:
 
     def scan(self, silent, scanType, target):
         # scanType - 0 = File/Directory, 1 = Image, ...
-        if os.path.isfile("scan_outputs/trivy_out.json"):
-            os.remove("scan_outputs/trivy_out.json")
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = SCAN_DIR / "trivy_out.json"
+        error_path = SCAN_DIR / "trivy_err.txt"
+        if output_path.exists():
+            output_path.unlink()
 
-        with open("scan_outputs/trivy_out.json", "w") as output_file, open("scan_outputs/trivy_err.txt", "w") as error_file:
+        with open(output_path, "w") as output_file, open(error_path, "w") as error_file:
             # Trivy only runs the scan. Report parsing belongs to ReportPlanCreator.
             match scanType:
                 case 0:
@@ -36,4 +40,4 @@ class TrivyScanner:
                 time.sleep(0.5)
 
             if not silent:
-                print("\nScan complete! Results can be found in scan_outputs/trivy_out.json")
+                print("\nTrivy scan complete.")

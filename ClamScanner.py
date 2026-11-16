@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from ScanPaths import SCAN_DIR
 
 class ClamScanner:
     def __init__(self):
@@ -10,11 +11,12 @@ class ClamScanner:
         return self.scan_path(silent, os.path.join("containers", target))
 
     def scan_path(self, silent, target):
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
         try:
             process = subprocess.Popen(
                 [
                     "clamscan",
-                    "--log=scan_outputs/clam_out.txt",
+                    "--log={}".format(SCAN_DIR / "clam_out.txt"),
                     "--recursive",
                     target,
                 ],
@@ -44,7 +46,7 @@ class ClamScanner:
             status = "error"
 
         if not silent:
-            print("\nScan complete! Results can be found in scan_outputs/clam_out.txt")
+            print("\nClamAV scan complete.")
 
         return {
             "status": status,

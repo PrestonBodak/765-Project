@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 import uuid
+from ScanPaths import SCAN_DIR
 
 class TraceeScanner:
 
@@ -11,11 +12,12 @@ class TraceeScanner:
     def scan(self, silent, image):
         container_name = "security-scan-{}".format(uuid.uuid4().hex[:8])
 
-        if os.path.isfile("scan_outputs/tracee_out.txt"):
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        if os.path.isfile(SCAN_DIR / "tracee_out.txt"):
             #Previous output exists, delete to overwrite
-            os.remove("scan_outputs/tracee_out.txt")
+            os.remove(SCAN_DIR / "tracee_out.txt")
 
-        with open("scan_outputs/tracee_out.txt", "a") as f:
+        with open(SCAN_DIR / "tracee_out.txt", "a") as f:
             tracee_process = subprocess.Popen(
                 ["sudo", "tracee"], stdout=f, stderr=f
             )
@@ -77,5 +79,5 @@ class TraceeScanner:
                 tracee_process.wait()
 
         if not silent:
-            print("\nScan complete! Results can be found in scan_outputs/tracee_out.txt")
+            print("\nTracee scan complete.")
         return

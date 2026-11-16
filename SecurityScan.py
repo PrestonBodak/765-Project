@@ -1,7 +1,5 @@
 import shutil
-import uuid
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 
 from ClamScanner import ClamScanner
@@ -9,17 +7,15 @@ from PlanExecutor import PlanExecutor
 from ReportPlanCreator import ReportPlanCreator
 from TraceeScanner import TraceeScanner
 from TrivyScanner import TrivyScanner
+from ScanPaths import SCAN_DIR, reset_runtime_dirs
 
 
 class SecurityScan:
     """Coordinate one complete scan for one container image."""
 
     def __init__(self, image):
-        run_id = "{}_{}".format(
-            datetime.now().strftime("%Y%m%d_%H%M%S"),
-            uuid.uuid4().hex[:6],
-        )
-        self.run_dir = Path("scan_runs") / run_id
+        reset_runtime_dirs()
+        self.run_dir = SCAN_DIR
         self.raw_dir = self.run_dir / "raw"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.image = image
@@ -63,7 +59,7 @@ class SecurityScan:
             return {"status": "failed", "reason": "Trivy did not produce valid JSON."}
 
         TraceeScanner().scan(True, candidate_image)
-        tracee_output = Path("scan_outputs/tracee_out.txt")
+        tracee_output = SCAN_DIR / "tracee_out.txt"
         if not tracee_output.exists():
             return {"status": "failed", "reason": "Tracee did not produce output."}
 
@@ -298,7 +294,7 @@ class SecurityScan:
         try:
             clam_result = ClamScanner().scan_path(True, str(filesystem_dir))
             clam_output = self._copy_output(
-                "scan_outputs/clam_out.txt", "clam_out.txt"
+                SCAN_DIR / "clam_out.txt", "clam_out.txt"
             )
             self.report["stages"]["clamav"] = {
                 "result": clam_result,
@@ -317,10 +313,10 @@ class SecurityScan:
         trivy.scan(True, 1, self.image)
         self.executor.redact_secret_values()
         trivy_output = self._copy_output(
-            "scan_outputs/trivy_out.json", "trivy_out.json"
+            SCAN_DIR / "trivy_out.json", "trivy_out.json"
         )
         trivy_errors = self._copy_output(
-            "scan_outputs/trivy_err.txt", "trivy_err.txt"
+            SCAN_DIR / "trivy_err.txt", "trivy_err.txt"
         )
         vulnerabilities = self.report_creator.summarize_vulnerabilities()
         secrets = self.report_creator.summarize_secrets()
@@ -347,7 +343,7 @@ class SecurityScan:
 
         TraceeScanner().scan(True, self.image)
         tracee_output = self._copy_output(
-            "scan_outputs/tracee_out.txt", "tracee_out.txt"
+            SCAN_DIR / "tracee_out.txt", "tracee_out.txt"
         )
         self.report["stages"]["tracee"] = {
             "status": "completed" if tracee_output else "error",
