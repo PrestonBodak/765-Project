@@ -41,7 +41,10 @@ class TraceeScanner:
                     "--output",
                     "json",
                     "--scope",
-                    "container={}".format(container_name),
+                    "container=new",
+                    "--containers=docker",
+                    "--events",
+                    "execve,execveat,openat,openat2,write,connect,setuid,setgid,capset,mount,umount,setns,unshare,ptrace,bpf",
                     "--log",
                     "warn",
                 ],
@@ -50,7 +53,9 @@ class TraceeScanner:
             )
 
             try:
-                # Give Tracee time to initialize before starting the target.
+                # Give Tracee time to initialize before creating the target.
+                # container=new captures this container from its creation event
+                # without requiring its cgroup to exist beforehand.
                 time.sleep(10)
 
                 if tracee_process.poll() is not None:
@@ -61,12 +66,11 @@ class TraceeScanner:
                         "configuration": self.SCAN_CONFIGURATION,
                     }
 
-                docker_process = subprocess.run(
+                docker_create = subprocess.run(
                     [
                         "sudo",
                         "docker",
-                        "run",
-                        "-d",
+                        "create",
                         "--name",
                         container_name,
                         "--network",
@@ -82,6 +86,24 @@ class TraceeScanner:
                         "256",
                         image,
                     ],
+                    stdout=subprocess.PIPE,
+                    stderr=errors,
+                    text=True,
+                )
+
+                if docker_create.returncode != 0:
+                    errors.write("Docker failed to create the scan container.\n")
+                    return {
+                        "status": "error",
+                        "output": str(self.OUTPUT_FILE),
+                        "configuration": self.SCAN_CONFIGURATION,
+                    }
+
+                container_id = docker_create.stdout.strip()
+                errors.write("Created scan container {}.\n".format(container_id))
+
+                docker_process = subprocess.run(
+                    ["sudo", "docker", "start", container_name],
                     stdout=errors,
                     stderr=errors,
                     text=True,
@@ -113,6 +135,14 @@ class TraceeScanner:
                         )
                     count += 1
                     time.sleep(0.5)
+
+                if tracee_process.poll() not in (None, 0):
+                    errors.write("Tracee exited while collecting runtime behavior.\n")
+                    return {
+                        "status": "error",
+                        "output": str(self.OUTPUT_FILE),
+                        "configuration": self.SCAN_CONFIGURATION,
+                    }
             finally:
                 # Always remove the temporary container, including on failure.
                 subprocess.run(
@@ -121,8 +151,9 @@ class TraceeScanner:
                     stderr=subprocess.DEVNULL,
                 )
 
-                tracee_process.terminate()
-                tracee_process.wait()
+                if tracee_process is not None:
+                    tracee_process.terminate()
+                    tracee_process.wait()
 
         if not silent:
             print("\nTracee scan complete.")

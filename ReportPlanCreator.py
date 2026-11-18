@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from PlanExecutor import PlanExecutor
 from ScanPaths import SCAN_DIR
@@ -72,6 +73,77 @@ class ReportPlanCreator:
     def _tracee_evidence(event):
         return json.dumps(event, separators=(",", ":"))[:500]
 
+    @staticmethod
+    def _tracee_values(value):
+        """Return scalar values from Tracee's nested argument structure."""
+        if isinstance(value, dict):
+            values = []
+            for item in value.values():
+                values.extend(ReportPlanCreator._tracee_values(item))
+            return values
+        if isinstance(value, list):
+            values = []
+            for item in value:
+                values.extend(ReportPlanCreator._tracee_values(item))
+            return values
+        return [str(value)]
+
+    @classmethod
+    def _tracee_details(cls, event):
+        """Extract the small pieces of event data useful to a new admin."""
+        arguments = event.get("args", [])
+        values = []
+        named_values = {}
+        for argument in arguments if isinstance(arguments, list) else []:
+            if not isinstance(argument, dict):
+                continue
+            name = str(argument.get("name", "")).lower()
+            value = argument.get("value")
+            named_values[name] = value
+            values.extend(cls._tracee_values(value))
+
+        destination = ""
+        address = named_values.get("addr")
+        if isinstance(address, dict):
+            ip = address.get("sin_addr") or address.get("sin6_addr")
+            port = address.get("sin_port")
+            if ip:
+                destination = str(ip)
+                if port:
+                    destination += ":{}".format(port)
+        if not destination:
+            for value in values:
+                if value.startswith("/"):
+                    continue
+                match = re.search(
+                    r"(?:https?://|ftp://)[^\s\"']+|"
+                    r"(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?",
+                    value,
+                )
+                if match:
+                    destination = match.group(0).rstrip(".,)")
+                    break
+
+        resource = ""
+        for name, value in named_values.items():
+            if name in {"pathname", "path", "filename", "target", "name"}:
+                candidates = cls._tracee_values(value)
+                if candidates and candidates[0].startswith((
+                    "/var/run/docker.sock", "/etc/shadow", "/root/.ssh",
+                    "/proc/", "/sys/", "/dev/mem",
+                )):
+                    resource = candidates[0]
+                    break
+        if not resource:
+            for value in values:
+                if value.startswith((
+                    "/var/run/docker.sock", "/etc/shadow", "/root/.ssh",
+                    "/proc/", "/sys/", "/dev/mem",
+                )):
+                    resource = value
+                    break
+        return {"destination": destination, "resource": resource}
+
     def summarize_tracee(self, report=None):
         """Turn Tracee JSON events into a small set of reviewable findings."""
         loaded = self._load_tracee_events() if report is None else report
@@ -84,23 +156,43 @@ class ReportPlanCreator:
 
         def add(category, severity, summary, event):
             event_name = self._tracee_event_name(event)
-            key = (category, event_name, event.get("processName", ""))
+            details = self._tracee_details(event)
+            key = (
+                category,
+                event_name,
+                event.get("processName", ""),
+                details["destination"],
+                details["resource"],
+            )
             if key in seen:
                 return
             seen.add(key)
+            description = summary
+            if category == "network_activity" and details["destination"]:
+                description = "The container attempted to contact {} while network access was disabled.".format(
+                    details["destination"]
+                )
+            elif category == "sensitive_resource_access" and details["resource"]:
+                description = "The container attempted to access the sensitive resource {}.".format(
+                    details["resource"]
+                )
             findings.append({
                 "id": "tracee-{}-{}".format(category, len(findings) + 1),
                 "category": category,
                 "severity": severity,
                 "title": summary,
                 "summary": summary,
+                "description": description,
                 "event": event_name or "unknown event",
                 "process": event.get("processName", "unknown process"),
+                "destination": details["destination"],
+                "resource": details["resource"],
                 "evidence": self._tracee_evidence(event),
             })
 
         download_commands = ("curl", "wget", "busybox", "git", "ftp", "scp")
         shell_commands = ("/bin/sh", "/bin/bash", "bash", "sh -c", "sudo")
+        escape_commands = ("/mount", "mount ", "nsenter", "unshare", "insmod")
         sensitive_paths = (
             "/var/run/docker.sock",
             "/etc/shadow",
@@ -122,7 +214,9 @@ class ReportPlanCreator:
             event_name = self._tracee_event_name(event)
             event_text = json.dumps(event, separators=(",", ":")).lower()
 
-            if any(command in event_text for command in download_commands):
+            if event_name in {"execve", "execveat"} and any(
+                command in event_text for command in download_commands
+            ):
                 download_seen = True
                 add(
                     "code_download",
@@ -165,6 +259,16 @@ class ReportPlanCreator:
                     "host_escape_behavior",
                     "CRITICAL",
                     "The container attempted an operation associated with host or namespace access.",
+                    event,
+                )
+
+            if event_name in {"execve", "execveat"} and any(
+                command in event_text for command in escape_commands
+            ):
+                add(
+                    "host_escape_behavior",
+                    "CRITICAL",
+                    "The container attempted to launch a host or namespace access tool.",
                     event,
                 )
 
@@ -359,7 +463,8 @@ class ReportPlanCreator:
                 "executor": None,
                 "parameters": {
                     "category": finding["category"],
-                    "evidence": finding["evidence"],
+                    "destination": finding.get("destination", ""),
+                    "resource": finding.get("resource", ""),
                 },
                 "status": "manual_review_required",
                 "approved": False,

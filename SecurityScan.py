@@ -1,5 +1,4 @@
 import shutil
-from collections import Counter
 from pathlib import Path
 
 from ClamScanner import ClamScanner
@@ -132,12 +131,17 @@ class SecurityScan:
             print("\n{} [{}] - {}".format(
                 finding["id"], finding["severity"], finding["package"]
             ))
+            print("What this means: {}".format(
+                finding.get("title") or "A known problem was found in this package."
+            ))
             print("Installed: {}".format(finding["installed_version"]))
             if finding["can_update"]:
                 print("Available fix: {}".format(finding["fixed_version"]))
                 print("[f] Accept the available fix")
             else:
                 print("No fix is currently available.")
+            if finding.get("url"):
+                print("More information: {}".format(finding["url"]))
             print("[a] Accept the risk")
             print("[r] Reject the image")
 
@@ -208,11 +212,13 @@ class SecurityScan:
     def _review_runtime_findings(self, findings, actions):
         self.plan.setdefault("reviews", {})["runtime_behavior"] = "in_progress"
         for finding, action in zip(findings, actions):
-            print("\n{} [{}]".format(finding["summary"], finding["severity"]))
-            print("Category: {}".format(finding["category"]))
-            print("Event: {}".format(finding["event"]))
-            print("Process: {}".format(finding["process"]))
-            print("Evidence: {}".format(finding["evidence"]))
+            print("\n{} [{}]".format(finding["description"], finding["severity"]))
+            if finding.get("destination"):
+                print("Destination: {}".format(finding["destination"]))
+            if finding.get("resource"):
+                print("Resource: {}".format(finding["resource"]))
+            print("This is a behavior Tracee observed while the image was running.")
+            print("Technical details are saved in {}/report.json.".format(self.run_dir))
             print("[a] Accept this behavior")
             print("[r] Reject the image")
 
@@ -241,18 +247,14 @@ class SecurityScan:
             "misconfigurations": "completed" if not misconfigurations else "pending",
             "runtime_behavior": "completed" if not runtime_findings else "pending",
         }
-        print("\nSecurity findings")
-        print("Vulnerabilities: {}".format(len(vulnerabilities)))
+        print("\nSecurity review")
+        print("Known software problems: {}".format(len(vulnerabilities)))
         fixable = sum(finding["can_update"] for finding in vulnerabilities)
-        print("  With available fixes: {}".format(fixable))
-        print("  Without available fixes: {}".format(len(vulnerabilities) - fixable))
-        for severity, count in sorted(Counter(
-            f["severity"].upper() for f in vulnerabilities
-        ).items()):
-            print("  {}: {}".format(severity, count))
-        print("Secrets: {}".format(len(secrets)))
-        print("Misconfigurations: {}".format(len(misconfigurations)))
-        print("Suspicious runtime behaviors: {}".format(len(runtime_findings)))
+        print("  Updates available: {}".format(fixable))
+        print("  No update currently available: {}".format(len(vulnerabilities) - fixable))
+        print("Possible credentials inside the image: {}".format(len(secrets)))
+        print("Docker configuration problems: {}".format(len(misconfigurations)))
+        print("Unexpected runtime behaviors: {}".format(len(runtime_findings)))
         print("Report: {}/report.json".format(self.run_dir))
 
         actions = self.plan["actions"]
@@ -329,6 +331,7 @@ class SecurityScan:
     def run(self, silent=False):
         print("\nStarting security scan for {}".format(self.image))
 
+        print("Preparing the image filesystem for scanning...", flush=True)
         filesystem_dir = self.executor.export_filesystem(self.image, self.run_dir)
         if filesystem_dir is None:
             self.plan["decision"] = "inconclusive"
@@ -338,6 +341,7 @@ class SecurityScan:
             return self.report, self.plan
 
         try:
+            print("Scanning for malware with ClamAV...", flush=True)
             clam_result = ClamScanner().scan_path(True, str(filesystem_dir))
             clam_output = self._copy_output(
                 SCAN_DIR / "clam_out.txt", "clam_out.txt"
@@ -356,6 +360,7 @@ class SecurityScan:
             return self.report, self.plan
 
         trivy = TrivyScanner()
+        print("Scanning for vulnerabilities, secrets, and misconfigurations with Trivy...", flush=True)
         trivy.scan(True, 1, self.image)
         self.executor.redact_secret_values()
         trivy_output = self._copy_output(
@@ -387,6 +392,7 @@ class SecurityScan:
             self.report_creator.actions_for(vulnerabilities, secrets, misconfigurations)
         )
 
+        print("Scanning runtime behavior with Tracee...", flush=True)
         tracee_result = TraceeScanner().scan(True, self.image)
         tracee_output = self._copy_output(
             SCAN_DIR / "tracee_out.json", "tracee_out.json"
@@ -408,13 +414,13 @@ class SecurityScan:
             "findings": tracee_findings,
         }
 
-        if (
-            not tracee_output
-            or not tracee_result
-            or tracee_result.get("status") != "completed"
-            or tracee_summary is None
-            or tracee_summary["parse_errors"]
-        ):
+        if not tracee_output or not tracee_result or tracee_result.get("status") != "completed":
+            self.plan["decision"] = "inconclusive"
+            self._save()
+            print("Security scan stopped because Tracee failed to start or collect runtime events.")
+            return self.report, self.plan
+
+        if tracee_summary is None or tracee_summary["parse_errors"]:
             self.plan["decision"] = "inconclusive"
             self._save()
             print("Security scan stopped because Tracee did not produce valid JSON output.")
