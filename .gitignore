@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+# Generated scanner reports
+scan_outputs/*
+!scan_outputs/.gitkeep
+
+# Downloaded and locally built container test artifacts
+containers/*
+!containers/test1.txt
+!containers/test2.txt
