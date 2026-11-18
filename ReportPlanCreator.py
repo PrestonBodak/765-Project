@@ -15,13 +15,15 @@ class ReportPlanCreator:
             "stages": {},
         }
 
-    def create_plan(self, image, image_id):
+    def create_plan(self, image, image_id, source_path=None, compose_service=None):
         return {
             "decision": "pending",
             "original_image": {
                 "reference": image,
                 "image_id": image_id,
             },
+            "source_path": str(source_path) if source_path else None,
+            "compose_service": compose_service,
             "candidate_image": None,
             "actions": [],
         }
@@ -419,7 +421,7 @@ class ReportPlanCreator:
                 return executor
         return "fix_misconfiguration_{}".format(finding["id"])
 
-    def actions_for(self, vulnerabilities, secrets, misconfigurations, tracee_findings=None):
+    def actions_for(self, vulnerabilities, secrets, misconfigurations, tracee_findings=None, source_path=None):
         actions = []
         for finding in vulnerabilities:
             executor = "update_image_package"
@@ -430,6 +432,7 @@ class ReportPlanCreator:
                 "parameters": {
                     "package": finding["package"],
                     "fixed_version": finding["fixed_version"],
+                    "source_path": str(source_path) if source_path else None,
                 },
                 "status": "pending" if PlanExecutor.can_execute(executor) else "manual_review_required",
                 "approved": False,
@@ -443,6 +446,7 @@ class ReportPlanCreator:
                 "parameters": {
                     "file": finding["file"],
                     "line": finding["line"],
+                    "source_path": str(source_path) if source_path else None,
                 },
                 "status": "pending" if PlanExecutor.can_execute(executor) else "manual_review_required",
                 "approved": False,
@@ -460,7 +464,7 @@ class ReportPlanCreator:
             actions.append({
                 "id": finding["id"],
                 "description": finding["summary"],
-                "executor": None,
+                "executor": "apply_tracee_permission",
                 "parameters": {
                     "category": finding["category"],
                     "destination": finding.get("destination", ""),

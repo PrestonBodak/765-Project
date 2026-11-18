@@ -13,6 +13,11 @@ class PlanExecutor:
     """Apply approved plan actions and sanitize their generated reports."""
 
     HANDLERS = {}
+    DEFAULT_RUNTIME_LIMITS = {
+        "cpu": "1.0",
+        "memory": "512m",
+        "pids": "256",
+    }
     HANDLER_SPECS = {
         "update_image_package": "Update a vulnerable package and rebuild the image.",
         "update_base_image": "Replace the vulnerable base image and rebuild.",
@@ -41,6 +46,7 @@ class PlanExecutor:
         "add_cpu_limit": "Add a CPU resource limit.",
         "add_memory_limit": "Add a memory resource limit.",
         "add_process_limit": "Add a process limit.",
+        "apply_tracee_permission": "Apply a narrowly scoped permission for an approved runtime behavior.",
         "create_candidate_image": "Build a candidate image without changing the original.",
         "validate_candidate_configuration": "Validate the candidate configuration.",
         "start_candidate_container": "Start the candidate in the isolated environment.",
@@ -67,6 +73,13 @@ class PlanExecutor:
     def can_execute(cls, name):
         return cls.handler_for(name) is not None
 
+    @staticmethod
+    def _source_action(name):
+        return name in {
+            "update_image_package",
+            "remove_secret_from_image",
+        }
+
     def execute(self, action, **kwargs):
         handler = self.handler_for(action.get("executor"))
         if handler is None:
@@ -79,7 +92,7 @@ class PlanExecutor:
         handler_kwargs.update(kwargs)
         return handler(**handler_kwargs)
 
-    def execute_plan(self, plan, image, run_dir, verify=None):
+    def execute_plan(self, plan, image, run_dir, verify=None, source_path=None, compose_service=None):
         """Apply approved actions to a candidate and verify each one."""
         actions = [action for action in plan.get("actions", []) if action.get("approved")]
         if not actions:
@@ -87,6 +100,16 @@ class PlanExecutor:
             return {"status": "no_changes_requested", "actions": []}
 
         for action in actions:
+            if self._source_action(action.get("executor")):
+                if source_path is None:
+                    action["status"] = "manual_review_required"
+                    action["execution"] = {
+                        "status": "manual_review_required",
+                        "reason": "A Dockerfile or Compose source path is required for this change.",
+                    }
+                    plan["decision"] = "manual_review_required"
+                    return {"status": "manual_review_required", "action": action["id"]}
+                continue
             if not self.can_execute(action.get("executor")):
                 action["status"] = "manual_review_required"
                 action["execution"] = self.execute(action)
@@ -97,21 +120,43 @@ class PlanExecutor:
             plan["decision"] = "verification_required"
             return {"status": "verification_required", "actions": []}
 
-        candidate = self.create_candidate(image, run_dir, actions)
+        source_actions = [action for action in actions if self._source_action(action.get("executor"))]
+        candidate_base = image
+        source_result = None
+        if source_actions:
+            source_result = self.prepare_source_image(
+                source_path, run_dir, source_actions, compose_service
+            )
+            if source_result.get("status") != "applied":
+                for action in source_actions:
+                    action["status"] = source_result.get("status", "failed")
+                    action["execution"] = source_result
+                plan["decision"] = source_result.get("status", "failed")
+                return {"status": plan["decision"], "actions": source_actions}
+            candidate_base = source_result["image"]
+
+        candidate = self.create_candidate(candidate_base, run_dir, actions)
         if candidate is None:
             plan["decision"] = "candidate_creation_failed"
             return {"status": "candidate_creation_failed", "actions": []}
 
         plan["candidate_image"] = candidate["image"]
         for action in actions:
-            result = self.execute(
-                action,
-                image=image,
-                candidate_container=candidate["container"],
-                candidate_image=candidate["image"],
-                run_dir=run_dir,
-                plan=plan,
-            )
+            if self._source_action(action.get("executor")):
+                result = {
+                    "status": "applied",
+                    "handler": action.get("executor"),
+                    "source_context": source_result.get("context"),
+                }
+            else:
+                result = self.execute(
+                    action,
+                    image=image,
+                    candidate_container=candidate["container"],
+                    candidate_image=candidate["image"],
+                    run_dir=run_dir,
+                    plan=plan,
+                )
             action["execution"] = result
             if result.get("status") != "applied":
                 action["status"] = result.get("status", "failed")
@@ -146,20 +191,28 @@ class PlanExecutor:
         return {"status": "changes_applied", "actions": actions}
 
     def create_candidate(self, image, run_dir, actions=None):
-        """Create an isolated candidate container and image tag."""
+        """Create a candidate with deny-by-default Docker settings."""
         run_name = "{}_{}".format(Path(run_dir).name, uuid.uuid4().hex[:6])
         name = "securityscan-{}-candidate".format(run_name)
         image_tag = "securityscan/{}:candidate".format(run_name)
         command = ["sudo", "docker", "create", "--name", name]
         executors = {action.get("executor") for action in actions or []}
-        if "drop_unnecessary_capabilities" in executors:
-            command.extend(["--cap-drop", "ALL"])
-        if "enable_no_new_privileges" in executors:
-            command.extend(["--security-opt", "no-new-privileges"])
-        if "enable_read_only_root_filesystem" in executors:
-            command.append("--read-only")
-        # Docker uses private namespaces and no host mounts/ports by default.
-        # These options deliberately stay absent for the corresponding fixes.
+        # Every candidate starts from the strict MVP policy. An approved finding
+        # can document why a setting is needed, but never weakens these defaults.
+        command.extend([
+            "--network", "none",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--pids-limit", self.DEFAULT_RUNTIME_LIMITS["pids"],
+        ])
+        if "set_non_root_user" in executors:
+            command.extend(["--user", "65532:65532"])
+        if "add_cpu_limit" in executors:
+            command.extend(["--cpus", self.DEFAULT_RUNTIME_LIMITS["cpu"]])
+        if "add_memory_limit" in executors:
+            command.extend(["--memory", self.DEFAULT_RUNTIME_LIMITS["memory"]])
         command.append(image)
         create = subprocess.run(
             command,
@@ -182,7 +235,249 @@ class PlanExecutor:
             )
             return None
 
+        state = subprocess.run(
+            ["sudo", "docker", "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name],
+            capture_output=True,
+            text=True,
+        )
+        if state.returncode != 0:
+            self.rollback_candidate({"container": name, "image": image_tag})
+            return None
+        status, _, exit_code = state.stdout.strip().partition(" ")
+        if status == "exited" and exit_code != "0":
+            self.rollback_candidate({"container": name, "image": image_tag})
+            return None
+
         return {"container": name, "image": image_tag}
+
+    def prepare_source_image(self, source_path, run_dir, actions, compose_service=None):
+        """Patch a copied Dockerfile, then build one candidate image."""
+        source = Path(source_path).expanduser().resolve()
+        if not source.exists():
+            return {"status": "manual_review_required", "reason": "Source path does not exist."}
+
+        context = Path(run_dir) / "build_context"
+        if context.exists():
+            shutil.rmtree(context)
+        context.mkdir(parents=True)
+        compose_file = None
+        if source.is_dir():
+            for item in source.iterdir():
+                destination = context / item.name
+                if item.is_dir():
+                    shutil.copytree(item, destination)
+                else:
+                    shutil.copy2(item, destination)
+            for name in ("compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"):
+                possible = context / name
+                if possible.exists():
+                    compose_file = possible
+                    break
+        else:
+            if source.name.lower() not in {"dockerfile", "compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"}:
+                return {"status": "manual_review_required", "reason": "Source must be a Dockerfile or Compose project."}
+            if source.name.lower().startswith("dockerfile"):
+                shutil.copy2(source, context / "Dockerfile")
+            else:
+                shutil.copy2(source, context / source.name)
+                compose_file = context / source.name
+
+        if compose_file:
+            return self._prepare_compose_image(
+                context, compose_file, actions, compose_service, run_dir
+            )
+
+        dockerfile = context / "Dockerfile"
+        if not dockerfile.exists():
+            return {"status": "manual_review_required", "reason": "No Dockerfile was found in the source path."}
+
+        for action in actions:
+            result = self.apply_source_action(context, dockerfile, action)
+            if result.get("status") != "applied":
+                return result
+
+        tag = "securityscan/{}:source-candidate".format(Path(run_dir).name)
+        build = subprocess.run(
+            ["sudo", "docker", "build", "--pull", "-t", tag, "-f", str(dockerfile), str(context)],
+            capture_output=True,
+            text=True,
+        )
+        if build.returncode != 0:
+            return {"status": "failed", "reason": "The patched source could not be rebuilt.", "output": build.stderr[-2000:]}
+        return {"status": "applied", "image": tag, "context": str(context)}
+
+    def _prepare_compose_image(self, context, compose_file, actions, service, run_dir):
+        services = subprocess.run(
+            ["sudo", "docker", "compose", "-f", str(compose_file), "config", "--services"],
+            cwd=context,
+            capture_output=True,
+            text=True,
+        )
+        if services.returncode != 0:
+            return {"status": "failed", "reason": "Compose configuration could not be validated."}
+        service_names = [line.strip() for line in services.stdout.splitlines() if line.strip()]
+        if service is None and len(service_names) == 1:
+            service = service_names[0]
+        if service not in service_names:
+            return {
+                "status": "manual_review_required",
+                "reason": "A valid Compose service name is required when the project has multiple services.",
+                "services": service_names,
+            }
+
+        dockerfile = context / "Dockerfile"
+        if any(action.get("executor") in {"update_image_package", "remove_secret_from_image"} for action in actions):
+            if not dockerfile.exists():
+                return {"status": "manual_review_required", "reason": "The Compose service has no local Dockerfile to rebuild."}
+            for action in actions:
+                result = self.apply_source_action(context, dockerfile, action)
+                if result.get("status") != "applied":
+                    return result
+
+        override = context / ".securityscan.override.yml"
+        override_lines = [
+            "services:",
+            "  {}:".format(service),
+            "    network_mode: none",
+            "    cap_drop:",
+            "      - ALL",
+            "    security_opt:",
+            "      - no-new-privileges:true",
+            "    read_only: true",
+            "    tmpfs:",
+            "      - /tmp:rw,noexec,nosuid,size=64m",
+            "    pids_limit: 256",
+        ]
+        executors = {action.get("executor") for action in actions}
+        if "add_cpu_limit" in executors:
+            override_lines.append("    cpus: 1.0")
+        if "add_memory_limit" in executors:
+            override_lines.append("    mem_limit: 512m")
+        if "set_non_root_user" in executors:
+            override_lines.append("    user: \"65532:65532\"")
+        override.write_text("\n".join(override_lines) + "\n")
+        files = ["-f", str(compose_file), "-f", str(override)]
+        build = subprocess.run(
+            ["sudo", "docker", "compose"] + files + ["build", "--pull", service],
+            cwd=context,
+            capture_output=True,
+            text=True,
+        )
+        if build.returncode != 0:
+            return {"status": "failed", "reason": "The hardened Compose service could not be rebuilt.", "output": build.stderr[-2000:]}
+        images = subprocess.run(
+            ["sudo", "docker", "compose"] + files + ["images", "-q", service],
+            cwd=context,
+            capture_output=True,
+            text=True,
+        )
+        image_id = images.stdout.strip().splitlines()[0] if images.returncode == 0 and images.stdout.strip() else ""
+        if not image_id:
+            return {"status": "failed", "reason": "Compose did not produce an image for the selected service."}
+        tag = "securityscan/{}:compose-candidate".format(Path(run_dir).name)
+        tagged = subprocess.run(
+            ["sudo", "docker", "tag", image_id, tag],
+            capture_output=True,
+            text=True,
+        )
+        if tagged.returncode != 0:
+            return {"status": "failed", "reason": "The Compose candidate could not be tagged."}
+        return {
+            "status": "applied",
+            "image": tag,
+            "context": str(context),
+            "compose_override": str(override),
+            "service": service,
+        }
+
+    def apply_source_action(self, context, dockerfile, action):
+        executor = action.get("executor")
+        parameters = action.get("parameters", {})
+        if executor == "update_image_package":
+            return self._patch_package_update(
+                dockerfile, parameters.get("package"), parameters.get("fixed_version")
+            )
+        if executor == "remove_secret_from_image":
+            return self._remove_secret_source(
+                context, parameters.get("file"), parameters.get("line")
+            )
+        if executor == "update_base_image":
+            return self._replace_base_image(dockerfile, parameters.get("new_base_image"))
+        return {"status": "manual_review_required", "reason": "Unsupported source action."}
+
+    @staticmethod
+    def _dockerfile_lines(path):
+        try:
+            return path.read_text().splitlines()
+        except OSError:
+            return None
+
+    def _patch_package_update(self, dockerfile, package, fixed_version):
+        if not package or not fixed_version:
+            return {"status": "manual_review_required", "reason": "Trivy did not provide a fixed package version."}
+        if not re.fullmatch(r"[A-Za-z0-9.+_:@=-]+", package) or not re.fullmatch(r"[A-Za-z0-9.+_:@=-]+", fixed_version):
+            return {"status": "manual_review_required", "reason": "Package values contain unsupported characters."}
+        lines = self._dockerfile_lines(dockerfile)
+        if lines is None:
+            return {"status": "failed", "reason": "Could not read the Dockerfile."}
+        text = "\n".join(lines).lower()
+        if "apt-get" in text or "debian" in text or "ubuntu" in text:
+            command = "RUN apt-get update && apt-get install -y --only-upgrade {}={} && rm -rf /var/lib/apt/lists/*".format(package, fixed_version)
+        elif "apk" in text or "alpine" in text:
+            command = "RUN apk add --no-cache {}={}".format(package, fixed_version)
+        elif "pip" in text or "python" in text:
+            command = "RUN python -m pip install --no-cache-dir {}=={}".format(package, fixed_version)
+        elif "npm" in text or "node" in text:
+            command = "RUN npm install --omit=dev {}@{}".format(package, fixed_version)
+        else:
+            return {"status": "manual_review_required", "reason": "The Dockerfile package manager was not recognized."}
+        insert_at = len(lines)
+        for index, line in enumerate(lines):
+            if re.match(r"\s*(USER|CMD|ENTRYPOINT|HEALTHCHECK)\b", line, re.IGNORECASE):
+                insert_at = index
+                break
+        lines.insert(insert_at, command)
+        dockerfile.write_text("\n".join(lines) + "\n")
+        return {"status": "applied", "handler": "update_image_package", "package": package, "fixed_version": fixed_version}
+
+    def _remove_secret_source(self, context, file, line):
+        if not file or line in (None, "unknown"):
+            return {"status": "manual_review_required", "reason": "The secret location is incomplete."}
+        try:
+            line_number = int(line)
+        except (TypeError, ValueError):
+            return {"status": "manual_review_required", "reason": "The secret line number is invalid."}
+        relative = Path(file)
+        if relative.is_absolute() or ".." in relative.parts or line_number < 1:
+            return {"status": "manual_review_required", "reason": "The secret path is not safe to edit automatically."}
+        target = (context / relative).resolve()
+        if context.resolve() not in target.parents or not target.is_file():
+            return {"status": "manual_review_required", "reason": "The secret file is not inside the build context."}
+        lines = target.read_text().splitlines()
+        if line_number > len(lines):
+            return {"status": "manual_review_required", "reason": "The secret line is no longer present."}
+        del lines[line_number - 1]
+        target.write_text("\n".join(lines) + ("\n" if lines else ""))
+        return {"status": "applied", "handler": "remove_secret_from_image", "file": file, "line": line_number}
+
+    def _replace_base_image(self, dockerfile, new_base_image):
+        if not new_base_image or not re.fullmatch(r"[A-Za-z0-9./:@_-]+", new_base_image):
+            return {"status": "manual_review_required", "reason": "A safe replacement base image was not provided."}
+        lines = self._dockerfile_lines(dockerfile)
+        if lines is None:
+            return {"status": "failed", "reason": "Could not read the Dockerfile."}
+        for index, line in enumerate(lines):
+            match = re.match(r"(\s*FROM\s+)([^\s]+)(.*)", line, re.IGNORECASE)
+            if not match:
+                continue
+            old = match.group(2).split("@")[0].split(":")[0]
+            new = new_base_image.split("@")[0].split(":")[0]
+            if old != new:
+                return {"status": "manual_review_required", "reason": "Replacement base image is outside the original image family."}
+            lines[index] = match.group(1) + new_base_image + match.group(3)
+            dockerfile.write_text("\n".join(lines) + "\n")
+            return {"status": "applied", "handler": "update_base_image", "image": new_base_image}
+        return {"status": "manual_review_required", "reason": "No base image instruction was found."}
 
     def commit_candidate(self, candidate):
         result = subprocess.run(
@@ -330,7 +625,6 @@ def replace_image(**kwargs): return _unimplemented_handler("replace_image", **kw
 def remove_secret_from_source(**kwargs): return _unimplemented_handler("remove_secret_from_source", **kwargs)
 def replace_secret_with_runtime_value(**kwargs): return _unimplemented_handler("replace_secret_with_runtime_value", **kwargs)
 def verify_secret_removed(**kwargs): return _unimplemented_handler("verify_secret_removed", **kwargs)
-def set_non_root_user(**kwargs): return _unimplemented_handler("set_non_root_user", **kwargs)
 def _inspect_candidate(candidate_container, field):
     result = subprocess.run(
         ["sudo", "docker", "inspect", "--format", field, candidate_container],
@@ -388,7 +682,7 @@ def enable_read_only_root_filesystem(candidate_container=None, **kwargs):
 
 def remove_host_network(candidate_container=None, **kwargs):
     return _verified_runtime_handler(
-        "remove_host_network", candidate_container, "default", "{{.HostConfig.NetworkMode}}"
+        "remove_host_network", candidate_container, "none", "{{.HostConfig.NetworkMode}}"
     )
 
 
@@ -552,13 +846,65 @@ def remove_setuid_setgid_permissions(candidate_container=None, **kwargs):
     }
 
 
+def set_non_root_user(candidate_container=None, **kwargs):
+    user = _inspect_candidate(candidate_container, "{{.Config.User}}")
+    if user is None:
+        return {"status": "failed", "handler": "set_non_root_user", "reason": "Could not inspect the candidate user."}
+    if user not in {"65532", "65532:65532"}:
+        return {"status": "failed", "handler": "set_non_root_user", "reason": "Candidate is not configured for the non-root runtime user."}
+    return {"status": "applied", "handler": "set_non_root_user", "candidate_container": candidate_container}
+
+
+def add_cpu_limit(candidate_container=None, **kwargs):
+    value = _inspect_candidate(candidate_container, "{{.HostConfig.NanoCpus}}")
+    if value is None:
+        return {"status": "failed", "handler": "add_cpu_limit", "reason": "Could not inspect the candidate CPU limit."}
+    if int(value or 0) <= 0:
+        return {"status": "failed", "handler": "add_cpu_limit", "reason": "Candidate has no CPU limit."}
+    return {"status": "applied", "handler": "add_cpu_limit", "candidate_container": candidate_container}
+
+
+def add_memory_limit(candidate_container=None, **kwargs):
+    value = _inspect_candidate(candidate_container, "{{.HostConfig.Memory}}")
+    if value is None:
+        return {"status": "failed", "handler": "add_memory_limit", "reason": "Could not inspect the candidate memory limit."}
+    if int(value or 0) <= 0:
+        return {"status": "failed", "handler": "add_memory_limit", "reason": "Candidate has no memory limit."}
+    return {"status": "applied", "handler": "add_memory_limit", "candidate_container": candidate_container}
+
+
+def add_process_limit(candidate_container=None, **kwargs):
+    value = _inspect_candidate(candidate_container, "{{.HostConfig.PidsLimit}}")
+    if value is None:
+        return {"status": "failed", "handler": "add_process_limit", "reason": "Could not inspect the candidate process limit."}
+    if int(value or 0) <= 0:
+        return {"status": "failed", "handler": "add_process_limit", "reason": "Candidate has no process limit."}
+    return {"status": "applied", "handler": "add_process_limit", "candidate_container": candidate_container}
+
+
+def apply_tracee_permission(category=None, destination=None, resource=None, **kwargs):
+    """Apply only runtime permissions that are safe within the MVP boundary."""
+    if category == "network_activity":
+        return {
+            "status": "applied",
+            "handler": "apply_tracee_permission",
+            "permission": "report_only",
+            "reason": "Firewall and per-IP network rules are outside this tool.",
+            "destination": destination or "unknown destination",
+        }
+    return {
+        "status": "manual_review_required",
+        "handler": "apply_tracee_permission",
+        "reason": "This runtime behavior has no safe Docker permission mapping and remains denied by the strict policy.",
+        "category": category,
+        "resource": resource,
+    }
+
+
 def pin_base_image_version(**kwargs): return _unimplemented_handler("pin_base_image_version", **kwargs)
 def remove_remote_download(**kwargs): return _unimplemented_handler("remove_remote_download", **kwargs)
 def replace_unsafe_add_instruction(**kwargs): return _unimplemented_handler("replace_unsafe_add_instruction", **kwargs)
 def add_healthcheck(**kwargs): return _unimplemented_handler("add_healthcheck", **kwargs)
-def add_cpu_limit(**kwargs): return _unimplemented_handler("add_cpu_limit", **kwargs)
-def add_memory_limit(**kwargs): return _unimplemented_handler("add_memory_limit", **kwargs)
-def add_process_limit(**kwargs): return _unimplemented_handler("add_process_limit", **kwargs)
 def create_candidate_image(**kwargs): return _unimplemented_handler("create_candidate_image", **kwargs)
 def validate_candidate_configuration(**kwargs): return _unimplemented_handler("validate_candidate_configuration", **kwargs)
 def start_candidate_container(**kwargs): return _unimplemented_handler("start_candidate_container", **kwargs)
@@ -570,8 +916,6 @@ def promote_candidate_image(**kwargs): return _unimplemented_handler("promote_ca
 
 
 PlanExecutor.register_handler("remove_privileged_mode", remove_privileged_mode)
-PlanExecutor.register_handler("update_image_package", update_image_package)
-PlanExecutor.register_handler("remove_secret_from_image", remove_secret_from_image)
 PlanExecutor.register_handler("drop_unnecessary_capabilities", drop_unnecessary_capabilities)
 PlanExecutor.register_handler("enable_no_new_privileges", enable_no_new_privileges)
 PlanExecutor.register_handler("enable_read_only_root_filesystem", enable_read_only_root_filesystem)
@@ -582,3 +926,8 @@ PlanExecutor.register_handler("remove_docker_socket_mount", remove_docker_socket
 PlanExecutor.register_handler("remove_or_narrow_host_mount", remove_or_narrow_host_mount)
 PlanExecutor.register_handler("restrict_published_ports", restrict_published_ports)
 PlanExecutor.register_handler("remove_setuid_setgid_permissions", remove_setuid_setgid_permissions)
+PlanExecutor.register_handler("set_non_root_user", set_non_root_user)
+PlanExecutor.register_handler("add_cpu_limit", add_cpu_limit)
+PlanExecutor.register_handler("add_memory_limit", add_memory_limit)
+PlanExecutor.register_handler("add_process_limit", add_process_limit)
+PlanExecutor.register_handler("apply_tracee_permission", apply_tracee_permission)

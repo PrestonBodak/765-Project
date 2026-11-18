@@ -1,5 +1,6 @@
 #Imports TBD
 import sys, os
+from pathlib import Path
 from ClamScanner import ClamScanner
 from PlanExecutor import PlanExecutor
 from ReportPlanCreator import ReportPlanCreator
@@ -186,7 +187,19 @@ while True:
             global_cmd = "securityscan"
             print("Enter the Docker image to scan (e.g. gitea:latest):")
             image = user_input(False)
-            SecurityScan(image).run(False)
+            print("Optional Dockerfile/Compose path (press Enter to skip):")
+            source_path = input("DockerEnvScanner/securityscan> ").strip() or None
+            compose_service = None
+            if source_path and (
+                source_path.lower().endswith((".yml", ".yaml"))
+                or (Path(source_path).is_dir() and any(
+                    (Path(source_path) / name).exists()
+                    for name in ("compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml")
+                ))
+            ):
+                print("Optional Compose service name (press Enter if there is only one):")
+                compose_service = input("DockerEnvScanner/securityscan> ").strip() or None
+            SecurityScan(image, source_path, compose_service).run(False)
 
             continue
 

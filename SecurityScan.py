@@ -12,17 +12,21 @@ from ScanPaths import SCAN_DIR, reset_runtime_dirs
 class SecurityScan:
     """Coordinate one complete scan for one container image."""
 
-    def __init__(self, image):
+    def __init__(self, image, source_path=None, compose_service=None):
         reset_runtime_dirs()
         self.run_dir = SCAN_DIR
         self.raw_dir = self.run_dir / "raw"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.image = image
+        self.source_path = source_path
+        self.compose_service = compose_service
         self.executor = PlanExecutor()
         self.report_creator = ReportPlanCreator()
         self.image_id = self.executor.image_id(image)
         self.report = self.report_creator.create_report(image, self.image_id)
-        self.plan = self.report_creator.create_plan(image, self.image_id)
+        self.plan = self.report_creator.create_plan(
+            image, self.image_id, source_path, compose_service
+        )
 
     def _save(self):
         self.report_creator.save(self.run_dir, self.report, self.plan)
@@ -37,6 +41,8 @@ class SecurityScan:
     def _verify_candidate(self, candidate_image, action, plan):
         """Run the existing scanners against a candidate image."""
         verification_dir = self.run_dir / "verification"
+        candidate_verification_dir = verification_dir / action.get("id", "candidate")
+        candidate_verification_dir.mkdir(parents=True, exist_ok=True)
         filesystem_dir = self.executor.export_filesystem(
             candidate_image, verification_dir
         )
@@ -59,6 +65,7 @@ class SecurityScan:
 
         tracee_result = TraceeScanner().scan(True, candidate_image)
         tracee_output = SCAN_DIR / "tracee_out.json"
+        tracee_error = SCAN_DIR / "tracee_err.txt"
         if (
             not tracee_output.exists()
             or not tracee_result
@@ -66,10 +73,112 @@ class SecurityScan:
         ):
             return {"status": "failed", "reason": "Tracee did not produce output."}
 
+        candidate_tracee_output = candidate_verification_dir / "tracee_out.json"
+        candidate_tracee_error = candidate_verification_dir / "tracee_err.txt"
+        shutil.copyfile(tracee_output, candidate_tracee_output)
+        if tracee_error.exists():
+            shutil.copyfile(tracee_error, candidate_tracee_error)
+        tracee_error_text = tracee_error.read_text(errors="replace") if tracee_error.exists() else ""
+        fatal_lines = [
+            line for line in tracee_error_text.splitlines()
+            if '"level":"fatal"' in line.lower()
+            or '"level":"error"' in line.lower()
+            or " fatal " in line.lower()
+        ]
+
+        candidate_tracee = self.report_creator.summarize_tracee()
+        if candidate_tracee is None or candidate_tracee.get("parse_errors"):
+            return {"status": "failed", "reason": "Tracee produced invalid candidate output."}
+        if not candidate_tracee.get("event_count"):
+            return {"status": "failed", "reason": "Tracee observed no candidate startup events."}
+        if fatal_lines:
+            return {
+                "status": "failed",
+                "reason": "Tracee reported an immediate candidate startup error.",
+                "tracee_errors": fatal_lines[-5:],
+            }
+
+        candidate_vulnerabilities = self.report_creator.summarize_vulnerabilities(trivy_report)
+        candidate_secrets = self.report_creator.summarize_secrets(trivy_report)
+        candidate_misconfigurations = self.report_creator.summarize_misconfigurations(trivy_report)
+        baseline_trivy = self.report.get("stages", {}).get("trivy", {})
+        baseline_tracee = self.report.get("stages", {}).get("tracee", {}).get("findings", [])
+
+        baseline_vulnerabilities = baseline_trivy.get("vulnerabilities", [])
+        baseline_secrets = baseline_trivy.get("secrets", [])
+        baseline_misconfigurations = baseline_trivy.get("misconfigurations", [])
+        baseline_vulnerability_keys = {
+            (finding.get("id"), finding.get("package"))
+            for finding in baseline_vulnerabilities
+        }
+        candidate_vulnerability_keys = {
+            (finding.get("id"), finding.get("package"))
+            for finding in candidate_vulnerabilities
+        }
+        new_vulnerabilities = candidate_vulnerability_keys - baseline_vulnerability_keys
+        new_secrets = {
+            (finding.get("file"), finding.get("line"))
+            for finding in candidate_secrets
+        } - {
+            (finding.get("file"), finding.get("line"))
+            for finding in baseline_secrets
+        }
+        new_misconfigurations = {
+            finding.get("id") for finding in candidate_misconfigurations
+        } - {finding.get("id") for finding in baseline_misconfigurations}
+        baseline_runtime_keys = {
+            (finding.get("category"), finding.get("destination"), finding.get("resource"))
+            for finding in baseline_tracee
+        }
+        new_runtime = [
+            finding for finding in candidate_tracee.get("findings", [])
+            if (
+                finding.get("category"),
+                finding.get("destination"),
+                finding.get("resource"),
+            ) not in baseline_runtime_keys
+            and finding.get("severity") in {"CRITICAL", "HIGH"}
+        ]
+
+        if new_vulnerabilities or new_secrets or new_misconfigurations or new_runtime:
+            return {
+                "status": "failed",
+                "reason": "The candidate introduced new security findings.",
+                "new_vulnerabilities": sorted(new_vulnerabilities),
+                "new_secrets": sorted(new_secrets),
+                "new_misconfigurations": sorted(new_misconfigurations),
+                "new_runtime_behaviors": new_runtime,
+            }
+
+        if action.get("executor") == "update_image_package" and action.get("id") in {
+            finding.get("id") for finding in candidate_vulnerabilities
+        }:
+            return {"status": "failed", "reason": "The requested vulnerability remains after the package update."}
+
+        if action.get("executor") == "remove_secret_from_image":
+            parameters = action.get("parameters", {})
+            if any(
+                finding.get("file") == parameters.get("file")
+                and str(finding.get("line")) == str(parameters.get("line"))
+                for finding in candidate_secrets
+            ):
+                return {"status": "failed", "reason": "The requested secret remains in the candidate."}
+
         return {
             "status": "passed",
             "candidate_image": candidate_image,
             "action": action.get("id"),
+            "comparison": {
+                "new_vulnerabilities": 0,
+                "new_secrets": 0,
+                "new_misconfigurations": 0,
+                "new_runtime_behaviors": 0,
+            },
+            "startup": {
+                "event_count": candidate_tracee.get("event_count", 0),
+                "tracee_output": str(candidate_tracee_output),
+                "tracee_errors": str(candidate_tracee_error) if candidate_tracee_error.exists() else None,
+            },
         }
 
     def _reject_image(self):
@@ -232,8 +341,9 @@ class SecurityScan:
                 self._save()
                 return not self._reject_image()
 
-            action["status"] = "accepted_risk"
-            action["decision"] = "accept_risk"
+            action["approved"] = True
+            action["status"] = "approved"
+            action["decision"] = "accept_behavior"
             self._save()
 
         self.plan["reviews"]["runtime_behavior"] = "completed"
@@ -319,6 +429,8 @@ class SecurityScan:
             self.image,
             self.run_dir,
             verify=self._verify_candidate,
+            source_path=self.source_path,
+            compose_service=self.compose_service,
         )
         if self.plan.get("candidate_archive"):
             self.report["candidate_image"] = self.plan.get("candidate_image")
@@ -389,7 +501,9 @@ class SecurityScan:
             return self.report, self.plan
 
         self.plan["actions"].extend(
-            self.report_creator.actions_for(vulnerabilities, secrets, misconfigurations)
+            self.report_creator.actions_for(
+                vulnerabilities, secrets, misconfigurations, source_path=self.source_path
+            )
         )
 
         print("Scanning runtime behavior with Tracee...", flush=True)
@@ -427,7 +541,7 @@ class SecurityScan:
             return self.report, self.plan
 
         self.plan["actions"].extend(
-            self.report_creator.actions_for([], [], [], tracee_findings)
+            self.report_creator.actions_for([], [], [], tracee_findings, self.source_path)
         )
 
         if not silent:
