@@ -1,10 +1,13 @@
-import os
 import subprocess
 import time
 import uuid
 from ScanPaths import SCAN_DIR
 
+
 class TraceeScanner:
+
+    OUTPUT_FILE = SCAN_DIR / "tracee_out.json"
+    ERROR_FILE = SCAN_DIR / "tracee_err.txt"
 
     def __init__(self):
         return
@@ -13,13 +16,20 @@ class TraceeScanner:
         container_name = "security-scan-{}".format(uuid.uuid4().hex[:8])
 
         SCAN_DIR.mkdir(parents=True, exist_ok=True)
-        if os.path.isfile(SCAN_DIR / "tracee_out.txt"):
-            #Previous output exists, delete to overwrite
-            os.remove(SCAN_DIR / "tracee_out.txt")
+        self.OUTPUT_FILE.unlink(missing_ok=True)
+        self.ERROR_FILE.unlink(missing_ok=True)
 
-        with open(SCAN_DIR / "tracee_out.txt", "a") as f:
+        # Tracee's JSON output is newline-delimited JSON: each event is one
+        # complete JSON object, which can be streamed without buffering the
+        # entire scan in memory.
+        with (
+            open(self.OUTPUT_FILE, "w") as output,
+            open(self.ERROR_FILE, "w") as errors,
+        ):
             tracee_process = subprocess.Popen(
-                ["sudo", "tracee"], stdout=f, stderr=f
+                ["sudo", "tracee", "--output", "json"],
+                stdout=output,
+                stderr=errors,
             )
 
             try:
@@ -27,8 +37,8 @@ class TraceeScanner:
                 time.sleep(10)
 
                 if tracee_process.poll() is not None:
-                    f.write("\nTracee exited before the container started.\n")
-                    return
+                    errors.write("Tracee exited before the container started.\n")
+                    return {"status": "error", "output": str(self.OUTPUT_FILE)}
 
                 docker_process = subprocess.run(
                     [
@@ -40,16 +50,16 @@ class TraceeScanner:
                         container_name,
                         image,
                     ],
-                    stdout=f,
-                    stderr=f,
+                    stdout=errors,
+                    stderr=errors,
                     text=True,
                 )
 
                 if docker_process.returncode != 0:
-                    f.write("\nDocker failed to start the scan container.\n")
-                    return
+                    errors.write("Docker failed to start the scan container.\n")
+                    return {"status": "error", "output": str(self.OUTPUT_FILE)}
 
-                f.write(
+                errors.write(
                     "\nStarted scan container {} from {}.\n".format(
                         container_name, image
                     )
@@ -80,4 +90,8 @@ class TraceeScanner:
 
         if not silent:
             print("\nTracee scan complete.")
-        return
+        return {
+            "status": "completed",
+            "output": str(self.OUTPUT_FILE),
+            "errors": str(self.ERROR_FILE),
+        }

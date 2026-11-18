@@ -59,7 +59,7 @@ class SecurityScan:
             return {"status": "failed", "reason": "Trivy did not produce valid JSON."}
 
         TraceeScanner().scan(True, candidate_image)
-        tracee_output = SCAN_DIR / "tracee_out.txt"
+        tracee_output = SCAN_DIR / "tracee_out.json"
         if not tracee_output.exists():
             return {"status": "failed", "reason": "Tracee did not produce output."}
 
@@ -343,11 +343,15 @@ class SecurityScan:
 
         TraceeScanner().scan(True, self.image)
         tracee_output = self._copy_output(
-            SCAN_DIR / "tracee_out.txt", "tracee_out.txt"
+            SCAN_DIR / "tracee_out.json", "tracee_out.json"
+        )
+        tracee_errors = self._copy_output(
+            SCAN_DIR / "tracee_err.txt", "tracee_err.txt"
         )
         self.report["stages"]["tracee"] = {
             "status": "completed" if tracee_output else "error",
             "evidence": tracee_output,
+            "errors": tracee_errors,
         }
 
         if not silent:
