@@ -1,6 +1,9 @@
 #Imports TBD
 import sys, os
 from ClamScanner import ClamScanner
+from PlanExecutor import PlanExecutor
+from ReportPlanCreator import ReportPlanCreator
+from SecurityScan import SecurityScan
 from TraceeScanner import TraceeScanner
 from TrivyScanner import TrivyScanner
 
@@ -17,6 +20,7 @@ Type "help" for a list of commands.
 help_menu = {
              "help" : "Displays a list of valid commands.",
              "singlescan" : "Enables the user to choose a file and tool to perform a scan.",
+             "securityscan" : "Runs ClamAV, Trivy, and Tracee and creates a report and plan.",
              "envscan" : "Runs a multi-file scan on all files in /containers.",
              "exit" : "Quit the program and return to the shell.",
              "q" : "An alias for \"exit\""
@@ -135,6 +139,11 @@ while True:
                             print("Calling tool {}".format(toolMap[toolChoice]) + (" on file/directory {}".format(containers[scanChoice - 1])) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 0, containers[scanChoice - 1])
+                            PlanExecutor().redact_secret_values()
+                            creator = ReportPlanCreator()
+                            creator.print_vulnerability_summary(creator.summarize_vulnerabilities())
+                            creator.print_secret_summary(creator.summarize_secrets())
+                            creator.print_misconfiguration_summary(creator.summarize_misconfigurations())
                             continue
 
                         case 2:
@@ -144,6 +153,11 @@ while True:
                             print("Calling tool {}".format(toolMap[toolChoice]) + (" on image {}").format(image) + "...")
                             scanner = TrivyScanner()
                             scanner.scan(False, 1, image)
+                            PlanExecutor().redact_secret_values()
+                            creator = ReportPlanCreator()
+                            creator.print_vulnerability_summary(creator.summarize_vulnerabilities())
+                            creator.print_secret_summary(creator.summarize_secrets())
+                            creator.print_misconfiguration_summary(creator.summarize_misconfigurations())
                             continue
 
                         case _:
@@ -153,17 +167,26 @@ while True:
                     continue
 
                 case 3:
-                    #Call Tracee scanner
-                    scanChoice = None
-                    print("Calling tool {}".format(toolMap[toolChoice]) + "...")
+                    #Call Tracee scanner against a temporary Docker container
+                    print("Enter the name of the Docker image to scan (e.g. aquasec/trivy):")
+                    image = user_input(False)
+                    print("Calling tool {}".format(toolMap[toolChoice]) + " on image {}...".format(image))
                     scanner = TraceeScanner()
-                    scanner.scan(False)
+                    scanner.scan(False, image)
                     continue
 
                 case _:
                     #Default case
                     print("Tool selection out of range. Exiting singlescan...")
                     continue
+
+            continue
+
+        case "securityscan":
+            global_cmd = "securityscan"
+            print("Enter the Docker image to scan (e.g. gitea:latest):")
+            image = user_input(False)
+            SecurityScan(image).run(False)
 
             continue
 

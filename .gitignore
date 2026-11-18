@@ -1,9 +1,11 @@
 __pycache__/
 *.py[cod]
 
-# Generated scanner reports
-scan_outputs/*
-!scan_outputs/.gitkeep
+# Current coordinated scan and promoted image archive
+scan/*
+fixed/*
+!scan/.gitkeep
+!fixed/.gitkeep
 
 # Downloaded and locally built container test artifacts
 containers/*

@@ -1,26 +1,36 @@
-import subprocess, time, os
+import os
+import subprocess
+import time
+from ScanPaths import SCAN_DIR
+
 
 class TrivyScanner:
     def __init__(self):
         return
 
     def scan(self, silent, scanType, target):
-        #scanType - 0 = File/Directory, 1 = Image, ...
+        # scanType - 0 = File/Directory, 1 = Image, ...
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = SCAN_DIR / "trivy_out.json"
+        error_path = SCAN_DIR / "trivy_err.txt"
+        if output_path.exists():
+            output_path.unlink()
 
-        if os.path.isfile("scan_outputs/trivy_out.txt"):
-            #Previous output exists, delete to overwrite
-            os.remove("scan_outputs/trivy_out.txt")
-
-        with open("scan_outputs/trivy_out.txt", "a") as f:
-            #Trivy has lots of features, so use switch/case for implementing future scan types.
+        with open(output_path, "w") as output_file, open(error_path, "w") as error_file:
+            # Trivy only runs the scan. Report parsing belongs to ReportPlanCreator.
             match scanType:
                 case 0:
-                    #Scan a target file/directory
-                    process = subprocess.Popen(["sudo", "trivy", "fs", "--scanners", "vuln,secret,misconfig", "./containers/" + target], stdout=f, stderr=f)
-
+                    process = subprocess.Popen(
+                        ["sudo", "trivy", "fs", "--scanners", "vuln,secret,misconfig", "--format", "json", "./containers/" + target],
+                        stdout=output_file,
+                        stderr=error_file,
+                    )
                 case 1:
-                    #Scan a target Docker image
-                    process = subprocess.Popen(["sudo", "trivy", "image", target], stdout=f, stderr=f)
+                    process = subprocess.Popen(
+                        ["sudo", "trivy", "image", "--scanners", "vuln,secret,misconfig", "--format", "json", target],
+                        stdout=output_file,
+                        stderr=error_file,
+                    )
 
             count = 0
             while process.poll() is None:
@@ -30,4 +40,4 @@ class TrivyScanner:
                 time.sleep(0.5)
 
             if not silent:
-                print("\nScan complete! Results can be found in scan_outputs/trivy_out.txt")
+                print("\nTrivy scan complete.")
