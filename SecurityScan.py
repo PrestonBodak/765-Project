@@ -58,9 +58,13 @@ class SecurityScan:
         if trivy_report is None:
             return {"status": "failed", "reason": "Trivy did not produce valid JSON."}
 
-        TraceeScanner().scan(True, candidate_image)
+        tracee_result = TraceeScanner().scan(True, candidate_image)
         tracee_output = SCAN_DIR / "tracee_out.json"
-        if not tracee_output.exists():
+        if (
+            not tracee_output.exists()
+            or not tracee_result
+            or tracee_result.get("status") != "completed"
+        ):
             return {"status": "failed", "reason": "Tracee did not produce output."}
 
         return {
@@ -201,11 +205,41 @@ class SecurityScan:
         self._save()
         return True
 
-    def _review_plan(self, vulnerabilities, secrets, misconfigurations):
+    def _review_runtime_findings(self, findings, actions):
+        self.plan.setdefault("reviews", {})["runtime_behavior"] = "in_progress"
+        for finding, action in zip(findings, actions):
+            print("\n{} [{}]".format(finding["summary"], finding["severity"]))
+            print("Category: {}".format(finding["category"]))
+            print("Event: {}".format(finding["event"]))
+            print("Process: {}".format(finding["process"]))
+            print("Evidence: {}".format(finding["evidence"]))
+            print("[a] Accept this behavior")
+            print("[r] Reject the image")
+
+            while True:
+                choice = input("Choose an action: ").strip().lower()
+                if choice in {"a", "r"}:
+                    break
+                print("Choose one of: a, r")
+
+            if choice == "r":
+                self._save()
+                return not self._reject_image()
+
+            action["status"] = "accepted_risk"
+            action["decision"] = "accept_risk"
+            self._save()
+
+        self.plan["reviews"]["runtime_behavior"] = "completed"
+        self._save()
+        return True
+
+    def _review_plan(self, vulnerabilities, secrets, misconfigurations, runtime_findings):
         self.plan["reviews"] = {
             "vulnerabilities": "completed" if not vulnerabilities else "pending",
             "secrets": "completed" if not secrets else "pending",
             "misconfigurations": "completed" if not misconfigurations else "pending",
+            "runtime_behavior": "completed" if not runtime_findings else "pending",
         }
         print("\nSecurity findings")
         print("Vulnerabilities: {}".format(len(vulnerabilities)))
@@ -218,30 +252,40 @@ class SecurityScan:
             print("  {}: {}".format(severity, count))
         print("Secrets: {}".format(len(secrets)))
         print("Misconfigurations: {}".format(len(misconfigurations)))
+        print("Suspicious runtime behaviors: {}".format(len(runtime_findings)))
         print("Report: {}/report.json".format(self.run_dir))
 
         actions = self.plan["actions"]
         vulnerability_end = len(vulnerabilities)
         secret_end = vulnerability_end + len(secrets)
+        misconfiguration_end = secret_end + len(misconfigurations)
 
         sections = {
             "1": ("vulnerabilities", vulnerabilities, actions[:vulnerability_end]),
             "2": ("secrets", secrets, actions[vulnerability_end:secret_end]),
-            "3": ("misconfigurations", misconfigurations, actions[secret_end:]),
+            "3": ("misconfigurations", misconfigurations, actions[secret_end:misconfiguration_end]),
+            "4": ("runtime_behavior", runtime_findings, actions[misconfiguration_end:]),
         }
+        section_labels = {
+            "vulnerabilities": "vulnerabilities",
+            "secrets": "secrets",
+            "misconfigurations": "misconfigurations",
+            "runtime_behavior": "runtime behavior",
+        }
+        apply_option = "5" if runtime_findings else "4"
 
         def print_menu():
             print("\nReview sections")
             for number, (section, findings, _) in sections.items():
                 if findings:
                     state = " (reviewed)" if self.plan["reviews"][section] == "completed" else ""
-                    print("{}. Review {}{}".format(number, section, state))
-            print("4. Apply approved changes")
+                    print("{}. Review {}{}".format(number, section_labels[section], state))
+            print("{}. Apply approved changes".format(apply_option))
 
         while True:
             print_menu()
             choice = input("Choose an option: ").strip()
-            if choice == "4":
+            if choice == apply_option:
                 if not all(value == "completed" for value in self.plan["reviews"].values()):
                     print("Review every non-empty section before applying changes.")
                     continue
@@ -253,6 +297,8 @@ class SecurityScan:
             section, findings, section_actions = sections[choice]
             if section == "vulnerabilities":
                 completed = self._review_vulnerabilities(findings, section_actions)
+            elif section == "runtime_behavior":
+                completed = self._review_runtime_findings(findings, section_actions)
             else:
                 completed = self._review_optional_findings(section, findings, section_actions)
             if not completed:
@@ -341,23 +387,47 @@ class SecurityScan:
             self.report_creator.actions_for(vulnerabilities, secrets, misconfigurations)
         )
 
-        TraceeScanner().scan(True, self.image)
+        tracee_result = TraceeScanner().scan(True, self.image)
         tracee_output = self._copy_output(
             SCAN_DIR / "tracee_out.json", "tracee_out.json"
         )
         tracee_errors = self._copy_output(
             SCAN_DIR / "tracee_err.txt", "tracee_err.txt"
         )
+        tracee_summary = self.report_creator.summarize_tracee()
+        tracee_findings = tracee_summary["findings"] if tracee_summary else []
         self.report["stages"]["tracee"] = {
-            "status": "completed" if tracee_output else "error",
+            "status": "completed"
+            if tracee_output and tracee_result and tracee_result.get("status") == "completed"
+            else "error",
             "evidence": tracee_output,
             "errors": tracee_errors,
+            "configuration": (tracee_result or {}).get("configuration", []),
+            "event_count": (tracee_summary or {}).get("event_count", 0),
+            "parse_errors": (tracee_summary or {}).get("parse_errors", 0),
+            "findings": tracee_findings,
         }
+
+        if (
+            not tracee_output
+            or not tracee_result
+            or tracee_result.get("status") != "completed"
+            or tracee_summary is None
+            or tracee_summary["parse_errors"]
+        ):
+            self.plan["decision"] = "inconclusive"
+            self._save()
+            print("Security scan stopped because Tracee did not produce valid JSON output.")
+            return self.report, self.plan
+
+        self.plan["actions"].extend(
+            self.report_creator.actions_for([], [], [], tracee_findings)
+        )
 
         if not silent:
             self._save()
             review_completed = self._review_plan(
-                vulnerabilities, secrets, misconfigurations
+                vulnerabilities, secrets, misconfigurations, tracee_findings
             )
             if review_completed is False:
                 print("Security scan stopped because the image was rejected.")

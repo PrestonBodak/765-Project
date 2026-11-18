@@ -8,6 +8,14 @@ class TraceeScanner:
 
     OUTPUT_FILE = SCAN_DIR / "tracee_out.json"
     ERROR_FILE = SCAN_DIR / "tracee_err.txt"
+    SCAN_CONFIGURATION = [
+        "--network none",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges:true",
+        "--read-only",
+        "--tmpfs /tmp:rw,noexec,nosuid,size=64m",
+        "--pids-limit 256",
+    ]
 
     def __init__(self):
         return
@@ -27,7 +35,16 @@ class TraceeScanner:
             open(self.ERROR_FILE, "w") as errors,
         ):
             tracee_process = subprocess.Popen(
-                ["sudo", "tracee", "--output", "json"],
+                [
+                    "sudo",
+                    "tracee",
+                    "--output",
+                    "json",
+                    "--scope",
+                    "container={}".format(container_name),
+                    "--log",
+                    "warn",
+                ],
                 stdout=output,
                 stderr=errors,
             )
@@ -38,7 +55,11 @@ class TraceeScanner:
 
                 if tracee_process.poll() is not None:
                     errors.write("Tracee exited before the container started.\n")
-                    return {"status": "error", "output": str(self.OUTPUT_FILE)}
+                    return {
+                        "status": "error",
+                        "output": str(self.OUTPUT_FILE),
+                        "configuration": self.SCAN_CONFIGURATION,
+                    }
 
                 docker_process = subprocess.run(
                     [
@@ -48,6 +69,17 @@ class TraceeScanner:
                         "-d",
                         "--name",
                         container_name,
+                        "--network",
+                        "none",
+                        "--cap-drop",
+                        "ALL",
+                        "--security-opt",
+                        "no-new-privileges:true",
+                        "--read-only",
+                        "--tmpfs",
+                        "/tmp:rw,noexec,nosuid,size=64m",
+                        "--pids-limit",
+                        "256",
                         image,
                     ],
                     stdout=errors,
@@ -57,7 +89,11 @@ class TraceeScanner:
 
                 if docker_process.returncode != 0:
                     errors.write("Docker failed to start the scan container.\n")
-                    return {"status": "error", "output": str(self.OUTPUT_FILE)}
+                    return {
+                        "status": "error",
+                        "output": str(self.OUTPUT_FILE),
+                        "configuration": self.SCAN_CONFIGURATION,
+                    }
 
                 errors.write(
                     "\nStarted scan container {} from {}.\n".format(
@@ -94,4 +130,5 @@ class TraceeScanner:
             "status": "completed",
             "output": str(self.OUTPUT_FILE),
             "errors": str(self.ERROR_FILE),
+            "configuration": self.SCAN_CONFIGURATION,
         }
