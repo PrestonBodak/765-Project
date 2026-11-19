@@ -1,4 +1,5 @@
 import shutil
+import json
 from pathlib import Path
 
 from ClamScanner import ClamScanner
@@ -475,15 +476,32 @@ class SecurityScan:
         print("Scanning for vulnerabilities, secrets, and misconfigurations with Trivy...", flush=True)
         trivy.scan(True, 1, self.image)
         self.executor.redact_secret_values()
+        if self.source_path:
+            trivy.scan_config(True, self.source_path)
         trivy_output = self._copy_output(
             SCAN_DIR / "trivy_out.json", "trivy_out.json"
+        )
+        trivy_config_output = self._copy_output(
+            SCAN_DIR / "trivy_config_out.json", "trivy_config_out.json"
         )
         trivy_errors = self._copy_output(
             SCAN_DIR / "trivy_err.txt", "trivy_err.txt"
         )
-        vulnerabilities = self.report_creator.summarize_vulnerabilities()
-        secrets = self.report_creator.summarize_secrets()
-        misconfigurations = self.report_creator.summarize_misconfigurations()
+        image_trivy_report = self.report_creator._load_trivy_report()
+        config_trivy_report = self.report_creator._load_trivy_report(
+            SCAN_DIR / "trivy_config_out.json"
+        ) if self.source_path else None
+        combined_trivy_report = self.report_creator.merge_trivy_reports(
+            image_trivy_report, config_trivy_report
+        )
+        with open(SCAN_DIR / "trivy_out.json", "w") as output_file:
+            json.dump(combined_trivy_report, output_file, indent=2)
+        trivy_output = self._copy_output(
+            SCAN_DIR / "trivy_out.json", "trivy_out.json"
+        )
+        vulnerabilities = self.report_creator.summarize_vulnerabilities(combined_trivy_report)
+        secrets = self.report_creator.summarize_secrets(combined_trivy_report)
+        misconfigurations = self.report_creator.summarize_misconfigurations(combined_trivy_report)
 
         self.report["stages"]["trivy"] = {
             "status": "completed" if vulnerabilities is not None and secrets is not None and misconfigurations is not None else "error",
@@ -491,6 +509,7 @@ class SecurityScan:
             "secrets": secrets or [],
             "misconfigurations": misconfigurations or [],
             "evidence": trivy_output,
+            "configuration_evidence": trivy_config_output,
             "errors": trivy_errors,
         }
 

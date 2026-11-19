@@ -43,6 +43,14 @@ class ReportPlanCreator:
         except (OSError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def merge_trivy_reports(*reports):
+        merged = {"Results": []}
+        for report in reports:
+            if report:
+                merged["Results"].extend(report.get("Results", []))
+        return merged
+
     def _load_tracee_events(self, report_path=None):
         report_path = SCAN_DIR / "tracee_out.json" if report_path is None else report_path
         try:
@@ -327,7 +335,7 @@ class ReportPlanCreator:
             for secret in result.get("Secrets", []) or []:
                 findings.append({
                     "type": secret.get("Title", secret.get("Category", "Unknown secret")),
-                    "file": secret.get("Target", result.get("Target", "Unknown target")),
+                    "file": secret.get("Target") or result.get("Target", "Unknown target"),
                     "line": secret.get("StartLine", "unknown"),
                     "severity": secret.get("Severity", "UNKNOWN"),
                 })
@@ -415,6 +423,10 @@ class ReportPlanCreator:
             ("host mount", "remove_or_narrow_host_mount"),
             ("bind mount", "remove_or_narrow_host_mount"),
             ("published port", "restrict_published_ports"),
+            ("root user", "set_non_root_user"),
+            ("running as root", "set_non_root_user"),
+            ("user should not be 'root'", "set_non_root_user"),
+            ("image user should not be 'root'", "set_non_root_user"),
         )
         for phrase, executor in matches:
             if phrase in text:

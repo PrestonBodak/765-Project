@@ -41,3 +41,24 @@ class TrivyScanner:
 
             if not silent:
                 print("\nTrivy scan complete.")
+
+    def scan_config(self, silent, target):
+        """Scan a Dockerfile or Compose project for configuration findings."""
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = SCAN_DIR / "trivy_config_out.json"
+        error_path = SCAN_DIR / "trivy_config_err.txt"
+        output_path.unlink(missing_ok=True)
+        with open(output_path, "w") as output_file, open(error_path, "w") as error_file:
+            process = subprocess.Popen(
+                [
+                    "sudo", "trivy", "config", "--format", "json", target,
+                ],
+                stdout=output_file,
+                stderr=error_file,
+            )
+            while process.poll() is None:
+                if not silent:
+                    print("\rScanning Docker configuration...", end="")
+                time.sleep(0.5)
+        if not silent:
+            print("\nDocker configuration scan complete.")

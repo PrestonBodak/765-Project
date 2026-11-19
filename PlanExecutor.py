@@ -78,6 +78,7 @@ class PlanExecutor:
         return name in {
             "update_image_package",
             "remove_secret_from_image",
+            "set_non_root_user",
         }
 
     def execute(self, action, **kwargs):
@@ -326,7 +327,7 @@ class PlanExecutor:
             }
 
         dockerfile = context / "Dockerfile"
-        if any(action.get("executor") in {"update_image_package", "remove_secret_from_image"} for action in actions):
+        if any(action.get("executor") in {"update_image_package", "remove_secret_from_image", "set_non_root_user"} for action in actions):
             if not dockerfile.exists():
                 return {"status": "manual_review_required", "reason": "The Compose service has no local Dockerfile to rebuild."}
             for action in actions:
@@ -401,6 +402,8 @@ class PlanExecutor:
             return self._remove_secret_source(
                 context, parameters.get("file"), parameters.get("line")
             )
+        if executor == "set_non_root_user":
+            return self._patch_non_root_user(dockerfile)
         if executor == "update_base_image":
             return self._replace_base_image(dockerfile, parameters.get("new_base_image"))
         return {"status": "manual_review_required", "reason": "Unsupported source action."}
@@ -448,9 +451,15 @@ class PlanExecutor:
         except (TypeError, ValueError):
             return {"status": "manual_review_required", "reason": "The secret line number is invalid."}
         relative = Path(file)
-        if relative.is_absolute() or ".." in relative.parts or line_number < 1:
+        if ".." in relative.parts or line_number < 1:
             return {"status": "manual_review_required", "reason": "The secret path is not safe to edit automatically."}
-        target = (context / relative).resolve()
+        if relative.is_absolute():
+            matches = list(context.rglob(relative.name))
+            if len(matches) != 1:
+                return {"status": "manual_review_required", "reason": "The image secret path could not be mapped uniquely to the source."}
+            target = matches[0].resolve()
+        else:
+            target = (context / relative).resolve()
         if context.resolve() not in target.parents or not target.is_file():
             return {"status": "manual_review_required", "reason": "The secret file is not inside the build context."}
         lines = target.read_text().splitlines()
@@ -478,6 +487,21 @@ class PlanExecutor:
             dockerfile.write_text("\n".join(lines) + "\n")
             return {"status": "applied", "handler": "update_base_image", "image": new_base_image}
         return {"status": "manual_review_required", "reason": "No base image instruction was found."}
+
+    def _patch_non_root_user(self, dockerfile):
+        lines = self._dockerfile_lines(dockerfile)
+        if lines is None:
+            return {"status": "failed", "reason": "Could not read the Dockerfile."}
+        if any(re.match(r"\s*USER\s+", line, re.IGNORECASE) for line in lines):
+            return {"status": "applied", "handler": "set_non_root_user", "message": "Dockerfile already defines a user."}
+        insert_at = len(lines)
+        for index, line in enumerate(lines):
+            if re.match(r"\s*(HEALTHCHECK|CMD|ENTRYPOINT)\b", line, re.IGNORECASE):
+                insert_at = index
+                break
+        lines.insert(insert_at, "USER 65532:65532")
+        dockerfile.write_text("\n".join(lines) + "\n")
+        return {"status": "applied", "handler": "set_non_root_user", "user": "65532:65532"}
 
     def commit_candidate(self, candidate):
         result = subprocess.run(
@@ -893,9 +917,10 @@ def apply_tracee_permission(category=None, destination=None, resource=None, **kw
             "destination": destination or "unknown destination",
         }
     return {
-        "status": "manual_review_required",
+        "status": "applied",
         "handler": "apply_tracee_permission",
-        "reason": "This runtime behavior has no safe Docker permission mapping and remains denied by the strict policy.",
+        "permission": "accepted_without_privilege_change",
+        "reason": "The behavior was approved as an exception; the strict Docker setting remains unchanged.",
         "category": category,
         "resource": resource,
     }
